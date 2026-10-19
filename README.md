@@ -52,7 +52,7 @@ If you use multiple Browser Sources across different OBS scenes, you can overrid
 
 **Example Custom URL:**
 ```text
-[http://127.0.0.1:8765/?w=640&h=135&radius=14&opacity=0.90&always_show=1](http://127.0.0.1:8765/?w=640&h=135&radius=14&opacity=0.90&always_show=1)
+http://127.0.0.1:8765/?w=640&h=135&radius=14&opacity=0.90&always_show=1
 ```
 
 ---
