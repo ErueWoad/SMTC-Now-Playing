@@ -32,7 +32,7 @@ A lightweight, native **Rust** Windows utility that reads currently playing trac
 ## 🎨 Customization
 
 ### 1. Live Web Settings Dashboard & Auto-Save
-Left-click the system tray icon (or right-click and choose **Widget Size & Style...**) to open `http://127.0.0.1:8765/settings` in your browser. All changes update OBS in real time and are automatically saved to `config.json` next to the executable (or `%APPDATA%\SMTC-Now-Playing\config.json` if running from a protected directory):
+Left-click the system tray icon (or right-click and choose **Widget Size & Style...**) to open `http://127.0.0.1:8765/settings` in your browser. All changes update OBS in real time and are automatically saved to `%APPDATA%\SMTC-Now-Playing\config.json`:
 * **Width**: `260 px` – `1920 px` (Default: `510 px`)
 * **Height (Length)**: `80 px` – `600 px` (Default: `122 px`)
 * **Corner Radius**: `0 px` – `60 px` (Default: `10 px`)
