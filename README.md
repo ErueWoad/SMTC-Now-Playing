@@ -5,6 +5,7 @@ A lightweight, native **Rust** Windows utility that reads currently playing trac
 ![Screenshot 1](Screens/Screen1.png)
 ![Screenshot 2](Screens/Screen2.png)
 ![Screenshot 2](Screens/Screen3.png)
+![Screenshot 2](Screens/Screen4.png)
 
 ---
 
