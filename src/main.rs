@@ -1,11 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::borrow::Cow;
 use std::env;
+use std::ffi::c_void;
 use std::fs;
-use std::io::Cursor;
-use std::os::windows::process::CommandExt;
+use std::io::{Cursor, Read};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
@@ -13,16 +13,18 @@ use std::sync::{
 use std::thread::{self, Thread};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use image::{imageops::FilterType, DynamicImage, GenericImageView, ImageFormat};
+use image::{
+    imageops::FilterType, DynamicImage, GenericImageView, ImageFormat, ImageReader, Limits,
+};
 use serde::{Deserialize, Serialize};
-use tiny_http::{Header, Method, Response, Server};
+use tiny_http::{Header, Method, Response, Server, StatusCode};
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
 };
 use windows::{
-    core::w,
-    Foundation::TypedEventHandler,
+    core::{w, PCWSTR},
+    Foundation::{EventRegistrationToken, TypedEventHandler},
     Media::Control::{
         GlobalSystemMediaTransportControlsSession as MediaSession,
         GlobalSystemMediaTransportControlsSessionManager as MediaManager,
@@ -41,9 +43,54 @@ const PORT: u16 = 8765;
 const MAX_THUMBNAIL_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_THUMBNAIL_RETRIES: u32 = 10;
 const WINDOWS_TO_UNIX_EPOCH_SECS: f64 = 11_644_473_600.0;
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const RUN_REG_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-const RUN_REG_VAL: &str = "SMTC-Now-Playing";
+
+// Native Win32 constants for Registry and ShellExecuteW
+const HKEY_CURRENT_USER: isize = 0x80000001u32 as i32 as isize;
+const RRF_RT_REG_SZ: u32 = 0x0000_0002;
+const REG_SZ: u32 = 1;
+const SW_SHOWNORMAL: i32 = 1;
+const RUN_SUBKEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+const RUN_VAL_NAME: PCWSTR = w!("SMTC-Now-Playing");
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegGetValueW(
+        hkey: isize,
+        lpsubkey: *const u16,
+        lpvalue: *const u16,
+        dwflags: u32,
+        pdwtype: *mut u32,
+        pvdata: *mut c_void,
+        pcbdata: *mut u32,
+    ) -> i32;
+
+    fn RegSetKeyValueW(
+        hkey: isize,
+        lpsubkey: *const u16,
+        lpvaluename: *const u16,
+        dwtype: u32,
+        lpdata: *const c_void,
+        cbdata: u32,
+    ) -> i32;
+
+    fn RegDeleteKeyValueW(
+        hkey: isize,
+        lpsubkey: *const u16,
+        lpvaluename: *const u16,
+    ) -> i32;
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteW(
+        hwnd: isize,
+        lpoperation: *const u16,
+        lpfile: *const u16,
+        lpparameters: *const u16,
+        lpdirectory: *const u16,
+        nshowcmd: i32,
+    ) -> isize;
+}
 
 // ---------------------------------------------------------------------------
 // Configuration & State Models
@@ -120,6 +167,15 @@ impl Config {
         if self.text_format.trim().is_empty() {
             self.text_format = "{artist} — {title}".to_string();
         }
+        if self.text_idle.len() > 512 {
+            self.text_idle.truncate(512);
+        }
+        if self.text_format.len() > 512 {
+            self.text_format.truncate(512);
+        }
+        if self.app_list.len() > 1024 {
+            self.app_list.truncate(1024);
+        }
         self
     }
 }
@@ -170,7 +226,7 @@ struct SharedApp {
     state_updated_at: Instant,
     config: Config,
     config_path: PathBuf,
-    art_png: Option<Arc<Vec<u8>>>,
+    art_png: Option<Arc<[u8]>>,
     run_on_startup: bool,
 }
 
@@ -232,15 +288,22 @@ fn get_config_path() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Windows Startup Registry Helpers
+// Native Windows Startup Registry & Shell Helpers
 // ---------------------------------------------------------------------------
 fn is_startup_enabled() -> bool {
-    Command::new("reg")
-        .args(["query", RUN_REG_KEY, "/v", RUN_REG_VAL])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut size: u32 = 0;
+    unsafe {
+        let status = RegGetValueW(
+            HKEY_CURRENT_USER,
+            RUN_SUBKEY.as_ptr(),
+            RUN_VAL_NAME.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        );
+        status == 0 && size > 2
+    }
 }
 
 fn set_startup_enabled(enable: bool) -> bool {
@@ -249,34 +312,63 @@ fn set_startup_enabled(enable: bool) -> bool {
             return false;
         };
         let quoted = format!("\"{}\"", exe.display());
-        Command::new("reg")
-            .args([
-                "add",
-                RUN_REG_KEY,
-                "/v",
-                RUN_REG_VAL,
-                "/t",
-                "REG_SZ",
-                "/d",
-                &quoted,
-                "/f",
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        let wide: Vec<u16> = quoted.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            let status = RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                RUN_SUBKEY.as_ptr(),
+                RUN_VAL_NAME.as_ptr(),
+                REG_SZ,
+                wide.as_ptr().cast(),
+                (wide.len() * std::mem::size_of::<u16>()) as u32,
+            );
+            status == 0
+        }
     } else {
-        let _ = Command::new("reg")
-            .args(["delete", RUN_REG_KEY, "/v", RUN_REG_VAL, "/f"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status();
+        unsafe {
+            let _ = RegDeleteKeyValueW(
+                HKEY_CURRENT_USER,
+                RUN_SUBKEY.as_ptr(),
+                RUN_VAL_NAME.as_ptr(),
+            );
+        }
         false
+    }
+}
+
+fn open_url(url: &str) {
+    let wide_url: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        ShellExecuteW(
+            0,
+            w!("open").as_ptr(),
+            wide_url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 
 // ---------------------------------------------------------------------------
 // Metadata Sanitizer & Plaintext Status Formatter
 // ---------------------------------------------------------------------------
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+fn ends_with_ascii_case_insensitive(haystack: &str, suffix: &str) -> bool {
+    haystack.len() >= suffix.len()
+        && haystack.as_bytes()[haystack.len() - suffix.len()..]
+            .eq_ignore_ascii_case(suffix.as_bytes())
+}
+
 fn sanitize_metadata(raw_title: &str, raw_artist: &str) -> (String, String) {
     let mut title = raw_title.trim().to_string();
     let mut artist = raw_artist.trim().to_string();
@@ -292,7 +384,7 @@ fn sanitize_metadata(raw_title: &str, raw_artist: &str) -> (String, String) {
         " | Spotify",
     ];
     for suf in platform_suffixes {
-        if title.len() > suf.len() && title.to_lowercase().ends_with(&suf.to_lowercase()) {
+        if title.len() > suf.len() && ends_with_ascii_case_insensitive(&title, suf) {
             title.truncate(title.len() - suf.len());
             title = title.trim().to_string();
         }
@@ -325,10 +417,9 @@ fn sanitize_metadata(raw_title: &str, raw_artist: &str) -> (String, String) {
     ];
 
     loop {
-        let lower = title.to_lowercase();
         let mut changed = false;
         for tag in noise_tags {
-            if let Some(idx) = lower.find(tag) {
+            if let Some(idx) = find_ascii_case_insensitive(&title, tag) {
                 let before = title[..idx].trim_end();
                 let after = title[idx + tag.len()..].trim_start();
                 title = if before.is_empty() {
@@ -370,17 +461,37 @@ fn format_status_text(state: &MediaState, cfg: &Config, custom_fmt: Option<&str>
         return cfg.text_idle.clone();
     }
     let template = custom_fmt.unwrap_or(&cfg.text_format);
-    template
-        .replace("{title}", &state.title)
-        .replace("{artist}", &state.artist)
-        .replace("{album}", &state.album)
-        .replace("{app}", &state.source_app)
-        .replace("{pos}", &format_clock(state.position))
-        .replace("{dur}", &format_clock(state.duration))
-        .replace(
-            "{status}",
-            if state.is_playing { "Playing" } else { "Paused" },
-        )
+    let mut out = String::with_capacity(template.len() + 64);
+    let mut rest = template;
+
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        if let Some(close) = after_open.find('}') {
+            let key = &after_open[..close];
+            match key {
+                "title" => out.push_str(&state.title),
+                "artist" => out.push_str(&state.artist),
+                "album" => out.push_str(&state.album),
+                "app" => out.push_str(&state.source_app),
+                "pos" => out.push_str(&format_clock(state.position)),
+                "dur" => out.push_str(&format_clock(state.duration)),
+                "status" => out.push_str(if state.is_playing { "Playing" } else { "Paused" }),
+                _ => {
+                    out.push('{');
+                    out.push_str(key);
+                    out.push('}');
+                }
+            }
+            rest = &after_open[close + 1..];
+        } else {
+            out.push_str(&rest[open..]);
+            rest = "";
+            break;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -505,16 +616,21 @@ fn extract_vibrant_palette(img: &DynamicImage) -> ([u8; 3], [u8; 3]) {
     (primary_rgb, secondary_rgb)
 }
 
-fn image_to_png_bytes(img: &DynamicImage) -> Option<(Vec<u8>, u64)> {
+fn process_artwork(img: &DynamicImage) -> ([u8; 3], [u8; 3], Option<(Arc<[u8]>, u64)>) {
     let (w, h) = img.dimensions();
-    let resized = if w > 256 || h > 256 {
-        img.resize(256, 256, FilterType::Lanczos3)
+    let resized: Cow<DynamicImage> = if w > 256 || h > 256 {
+        Cow::Owned(img.resize(256, 256, FilterType::Lanczos3))
     } else {
-        img.clone()
+        Cow::Borrowed(img)
     };
 
-    let mut buf = Cursor::new(Vec::new());
-    resized.write_to(&mut buf, ImageFormat::Png).ok()?;
+    // Extract vibrant palette from the already-downsampled <= 256x256 image
+    let (a1, a2) = extract_vibrant_palette(&resized);
+
+    let mut buf = Cursor::new(Vec::with_capacity(32 * 1024));
+    if resized.write_to(&mut buf, ImageFormat::Png).is_err() {
+        return (a1, a2, None);
+    }
     let bytes = buf.into_inner();
 
     // 64-bit FNV-1a hash for fast cache-busting URL token
@@ -527,7 +643,7 @@ fn image_to_png_bytes(img: &DynamicImage) -> Option<(Vec<u8>, u64)> {
         hash = 1;
     }
 
-    Some((bytes, hash))
+    (a1, a2, Some((Arc::from(bytes), hash)))
 }
 
 fn create_tray_icon() -> Icon {
@@ -539,7 +655,7 @@ fn create_tray_icon() -> Icon {
             let fx = x as f32 + 0.5;
             let fy = y as f32 + 0.5;
 
-            let in_rect = if fx >= 6.0 && fx <= 58.0 && fy >= 6.0 && fy <= 58.0 {
+            let in_rect = if (6.0..=58.0).contains(&fx) && (6.0..=58.0).contains(&fy) {
                 let cx = fx.clamp(20.0, 44.0);
                 let cy = fy.clamp(20.0, 44.0);
                 ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() <= 14.0
@@ -551,8 +667,7 @@ fn create_tray_icon() -> Icon {
                 continue;
             }
 
-            let in_triangle = fx >= 24.0
-                && fx <= 46.0
+            let in_triangle = (24.0..=46.0).contains(&fx)
                 && (fy - 32.0).abs() <= 14.0 * (46.0 - fx) / 22.0;
 
             let idx = ((y * size + x) * 4) as usize;
@@ -576,6 +691,105 @@ fn create_tray_icon() -> Icon {
 // ---------------------------------------------------------------------------
 // SMTC Session Filtering & Event-Driven Poller Thread
 // ---------------------------------------------------------------------------
+struct HookedManager {
+    mgr: MediaManager,
+    cur_token: Option<EventRegistrationToken>,
+    ses_token: Option<EventRegistrationToken>,
+}
+
+impl HookedManager {
+    fn new(mgr: MediaManager, poller_thread: &Thread) -> Self {
+        let t_cur = poller_thread.clone();
+        let cur_token = mgr
+            .CurrentSessionChanged(&TypedEventHandler::new(move |_, _| {
+                t_cur.unpark();
+                Ok(())
+            }))
+            .ok();
+
+        let t_ses = poller_thread.clone();
+        let ses_token = mgr
+            .SessionsChanged(&TypedEventHandler::new(move |_, _| {
+                t_ses.unpark();
+                Ok(())
+            }))
+            .ok();
+
+        Self {
+            mgr,
+            cur_token,
+            ses_token,
+        }
+    }
+}
+
+impl Drop for HookedManager {
+    fn drop(&mut self) {
+        if let Some(tok) = self.cur_token {
+            let _ = self.mgr.RemoveCurrentSessionChanged(tok);
+        }
+        if let Some(tok) = self.ses_token {
+            let _ = self.mgr.RemoveSessionsChanged(tok);
+        }
+    }
+}
+
+struct HookedSession {
+    session: MediaSession,
+    prop_token: Option<EventRegistrationToken>,
+    play_token: Option<EventRegistrationToken>,
+    time_token: Option<EventRegistrationToken>,
+}
+
+impl HookedSession {
+    fn new(session: MediaSession, poller_thread: &Thread) -> Self {
+        let t1 = poller_thread.clone();
+        let prop_token = session
+            .MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
+                t1.unpark();
+                Ok(())
+            }))
+            .ok();
+
+        let t2 = poller_thread.clone();
+        let play_token = session
+            .PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
+                t2.unpark();
+                Ok(())
+            }))
+            .ok();
+
+        let t3 = poller_thread.clone();
+        let time_token = session
+            .TimelinePropertiesChanged(&TypedEventHandler::new(move |_, _| {
+                t3.unpark();
+                Ok(())
+            }))
+            .ok();
+
+        Self {
+            session,
+            prop_token,
+            play_token,
+            time_token,
+        }
+    }
+}
+
+impl Drop for HookedSession {
+    fn drop(&mut self) {
+        if let Some(tok) = self.prop_token {
+            let _ = self.session.RemoveMediaPropertiesChanged(tok);
+        }
+        if let Some(tok) = self.play_token {
+            let _ = self.session.RemovePlaybackInfoChanged(tok);
+        }
+        if let Some(tok) = self.time_token {
+            let _ = self.session.RemoveTimelinePropertiesChanged(tok);
+        }
+    }
+}
+
 fn read_thumbnail(thumb_ref: &IRandomAccessStreamReference) -> Option<DynamicImage> {
     let stream = thumb_ref.OpenReadAsync().ok()?.get().ok()?;
     let result = (|| -> Option<DynamicImage> {
@@ -592,7 +806,16 @@ fn read_thumbnail(thumb_ref: &IRandomAccessStreamReference) -> Option<DynamicIma
         if !read_ok {
             return None;
         }
-        image::load_from_memory(&buf).ok()
+
+        let mut img_reader = ImageReader::new(Cursor::new(&buf))
+            .with_guessed_format()
+            .ok()?;
+        let mut limits = Limits::default();
+        limits.max_image_width = Some(4096);
+        limits.max_image_height = Some(4096);
+        limits.max_alloc = Some(64 * 1024 * 1024); // Cap decoded pixel allocation at 64 MB
+        img_reader.limits(limits);
+        img_reader.decode().ok()
     })();
     let _ = stream.Close();
     result
@@ -680,24 +903,6 @@ fn select_session(
     (allowed_sessions.into_iter().next(), discovered_apps)
 }
 
-fn register_session_events(session: &MediaSession, poller_thread: &Thread) {
-    let t1 = poller_thread.clone();
-    let _ = session.MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
-        t1.unpark();
-        Ok(())
-    }));
-    let t2 = poller_thread.clone();
-    let _ = session.PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
-        t2.unpark();
-        Ok(())
-    }));
-    let t3 = poller_thread.clone();
-    let _ = session.TimelinePropertiesChanged(&TypedEventHandler::new(move |_, _| {
-        t3.unpark();
-        Ok(())
-    }));
-}
-
 fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) -> Thread {
     let (thread_tx, thread_rx) = mpsc::channel::<Thread>();
 
@@ -709,12 +914,12 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
 
-        let mut manager: Option<MediaManager> = None;
-        let mut hooked_app_id = String::new();
+        let mut hooked_mgr: Option<HookedManager> = None;
+        let mut hooked_ses: Option<HookedSession> = None;
         let mut last_raw_track_key = String::new();
         let mut thumb_retries = 0u32;
         let mut cached_art_hash: u64 = 0;
-        let mut cached_art_bytes: Option<Arc<Vec<u8>>> = None;
+        let mut cached_art_bytes: Option<Arc<[u8]>> = None;
         let mut cached_accent: [u8; 3] = [255, 15, 135];
         let mut cached_accent2: [u8; 3] = [0, 210, 255];
         let mut local_anchor_time = Instant::now();
@@ -733,26 +938,17 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
             };
 
             let step = (|| -> windows::core::Result<bool> {
-                if manager.is_none() {
+                if hooked_mgr.is_none() {
                     let mgr = MediaManager::RequestAsync()?.get()?;
-                    let t_cur = my_thread.clone();
-                    let _ = mgr.CurrentSessionChanged(&TypedEventHandler::new(move |_, _| {
-                        t_cur.unpark();
-                        Ok(())
-                    }));
-                    let t_ses = my_thread.clone();
-                    let _ = mgr.SessionsChanged(&TypedEventHandler::new(move |_, _| {
-                        t_ses.unpark();
-                        Ok(())
-                    }));
-                    manager = Some(mgr);
+                    hooked_mgr = Some(HookedManager::new(mgr, &my_thread));
                 }
-                let mgr = manager.as_ref().unwrap();
+                let mgr = &hooked_mgr.as_ref().unwrap().mgr;
 
                 let (session_opt, active_sessions) =
                     select_session(mgr, &filter_mode, &app_list);
 
                 let Some(session) = session_opt else {
+                    hooked_ses = None;
                     was_playing = false;
                     if let Ok(mut app) = shared.lock() {
                         app.state.is_playing = false;
@@ -762,15 +958,14 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                     return Ok(false);
                 };
 
+                if hooked_ses.as_ref().map(|h| &h.session) != Some(&session) {
+                    hooked_ses = Some(HookedSession::new(session.clone(), &my_thread));
+                }
+
                 let source_app = session
                     .SourceAppUserModelId()
                     .map(|h| normalize_app_id(&h.to_string()))
                     .unwrap_or_else(|_| "Unknown".to_string());
-
-                if source_app != hooked_app_id {
-                    hooked_app_id = source_app.clone();
-                    register_session_events(&session, &my_thread);
-                }
 
                 let is_playing = session
                     .GetPlaybackInfo()
@@ -814,7 +1009,7 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                     (raw_title.clone(), raw_artist.clone())
                 };
 
-                let raw_track_key = format!("{raw_title}||{raw_artist}");
+                let raw_track_key = format!("{source_app}||{raw_title}||{raw_artist}");
                 let is_new_track = raw_track_key != last_raw_track_key;
                 let thumb_ref = props.Thumbnail().ok();
                 let should_retry_art = !is_new_track
@@ -839,12 +1034,12 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                 if is_new_track || should_retry_art {
                     if let Some(ref tref) = thumb_ref {
                         if let Some(img) = read_thumbnail(tref) {
-                            let (a1, a2) = extract_vibrant_palette(&img);
+                            let (a1, a2, encoded) = process_artwork(&img);
                             cached_accent = a1;
                             cached_accent2 = a2;
-                            if let Some((png_bytes, hash)) = image_to_png_bytes(&img) {
+                            if let Some((png_bytes, hash)) = encoded {
                                 cached_art_hash = hash;
-                                cached_art_bytes = Some(Arc::new(png_bytes));
+                                cached_art_bytes = Some(png_bytes);
                             }
                         } else {
                             thumb_retries += 1;
@@ -938,21 +1133,31 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
             })();
 
             match step {
-                Ok(true) => thread::park_timeout(Duration::from_millis(250)),
-                Ok(false) => thread::park_timeout(Duration::from_millis(500)),
+                Ok(true) => {
+                    // Fast retry if waiting on delayed thumbnail; otherwise 1s since events unpark immediately
+                    let wait_ms = if cached_art_hash == 0 && thumb_retries < MAX_THUMBNAIL_RETRIES {
+                        250
+                    } else {
+                        1000
+                    };
+                    thread::park_timeout(Duration::from_millis(wait_ms));
+                }
+                Ok(false) => thread::park_timeout(Duration::from_millis(1000)),
                 Err(_) => {
-                    manager = None;
-                    hooked_app_id.clear();
+                    hooked_ses = None;
+                    hooked_mgr = None;
                     was_playing = false;
                     if let Ok(mut app) = shared.lock() {
                         app.state.is_playing = false;
                         app.state_updated_at = Instant::now();
                     }
-                    thread::park_timeout(Duration::from_millis(500));
+                    thread::park_timeout(Duration::from_millis(1000));
                 }
             }
         }
 
+        drop(hooked_ses);
+        drop(hooked_mgr);
         unsafe {
             CoUninitialize();
         }
@@ -1001,18 +1206,59 @@ fn parse_query_param(query: &str, key: &str) -> Option<String> {
     None
 }
 
+fn is_valid_local_post(request: &tiny_http::Request) -> bool {
+    let has_json_ct = request.headers().iter().any(|h| {
+        h.field.equiv("Content-Type")
+            && h.value
+                .as_str()
+                .to_ascii_lowercase()
+                .starts_with("application/json")
+    });
+    if !has_json_ct {
+        return false;
+    }
+
+    for h in request.headers() {
+        if h.field.equiv("Origin") {
+            let origin = h.value.as_str();
+            if origin != "http://127.0.0.1:8765" && origin != "http://localhost:8765" {
+                return false;
+            }
+        } else if h.field.equiv("Host") {
+            let host = h.value.as_str();
+            if host != "127.0.0.1:8765" && host != "localhost:8765" {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn read_bounded_body(request: &mut tiny_http::Request, max_bytes: u64) -> Option<String> {
+    let mut body = String::new();
+    request
+        .as_reader()
+        .take(max_bytes)
+        .read_to_string(&mut body)
+        .ok()?;
+    Some(body)
+}
+
 fn spawn_http_server(
     shared: Arc<Mutex<SharedApp>>,
     running: Arc<AtomicBool>,
+    ui_dirty: Arc<AtomicBool>,
     server: Arc<Server>,
     poller_thread: Thread,
 ) {
     thread::spawn(move || {
         while running.load(Ordering::Relaxed) {
-            let Ok(Some(mut request)) = server.try_recv() else {
-                thread::sleep(Duration::from_millis(12));
-                continue;
+            let Ok(mut request) = server.recv() else {
+                break;
             };
+            if !running.load(Ordering::Relaxed) {
+                break;
+            }
 
             let full_url = request.url().to_string();
             let (url_path, query_str) = full_url.split_once('?').unwrap_or((&full_url, ""));
@@ -1055,12 +1301,14 @@ fn spawn_http_server(
                             &b"public, max-age=86400, immutable"[..],
                         )
                         .unwrap();
-                        let _ = request.respond(
-                            Response::from_data((*png_bytes).clone())
-                                .with_header(content_type)
-                                .with_header(cache_ctrl)
-                                .with_header(cors_hdr),
-                        );
+                        let len = png_bytes.len();
+                        let _ = request.respond(Response::new(
+                            StatusCode(200),
+                            vec![content_type, cache_ctrl, cors_hdr],
+                            Cursor::new(png_bytes),
+                            Some(len),
+                            None,
+                        ));
                     } else {
                         let _ = request
                             .respond(Response::from_string("No art").with_status_code(404));
@@ -1090,42 +1338,50 @@ fn spawn_http_server(
                     );
                 }
                 (&Method::Post, "/startup") => {
+                    if !is_valid_local_post(&request) {
+                        let _ = request
+                            .respond(Response::from_string("Forbidden").with_status_code(403));
+                        continue;
+                    }
                     #[derive(Deserialize)]
                     struct StartupPayload {
                         enabled: bool,
                     }
-                    let mut body = String::new();
-                    let _ = request.as_reader().read_to_string(&mut body);
-                    if let Ok(payload) = serde_json::from_str::<StartupPayload>(&body) {
-                        let actual = set_startup_enabled(payload.enabled);
-                        if let Ok(mut app) = shared.lock() {
-                            app.run_on_startup = actual;
+                    if let Some(body) = read_bounded_body(&mut request, 1024) {
+                        if let Ok(payload) = serde_json::from_str::<StartupPayload>(&body) {
+                            let actual = set_startup_enabled(payload.enabled);
+                            if let Ok(mut app) = shared.lock() {
+                                app.run_on_startup = actual;
+                            }
+                            ui_dirty.store(true, Ordering::Release);
                         }
                     }
                     let content_type =
                         Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
                     let _ = request.respond(
-                        Response::from_string("{\"ok\":true}")
-                            .with_header(content_type)
-                            .with_header(cors_hdr),
+                        Response::from_string("{\"ok\":true}").with_header(content_type),
                     );
                 }
                 (&Method::Post, "/config") => {
-                    let mut body = String::new();
-                    let _ = request.as_reader().read_to_string(&mut body);
-                    if let Ok(new_cfg) = serde_json::from_str::<Config>(&body) {
-                        if let Ok(mut app) = shared.lock() {
-                            app.config = new_cfg.clamped();
-                            app.save_config();
+                    if !is_valid_local_post(&request) {
+                        let _ = request
+                            .respond(Response::from_string("Forbidden").with_status_code(403));
+                        continue;
+                    }
+                    if let Some(body) = read_bounded_body(&mut request, 8192) {
+                        if let Ok(new_cfg) = serde_json::from_str::<Config>(&body) {
+                            if let Ok(mut app) = shared.lock() {
+                                app.config = new_cfg.clamped();
+                                app.save_config();
+                            }
+                            ui_dirty.store(true, Ordering::Release);
+                            poller_thread.unpark();
                         }
-                        poller_thread.unpark();
                     }
                     let content_type =
                         Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
                     let _ = request.respond(
-                        Response::from_string("{\"ok\":true}")
-                            .with_header(content_type)
-                            .with_header(cors_hdr),
+                        Response::from_string("{\"ok\":true}").with_header(content_type),
                     );
                 }
                 (&Method::Get, "/settings") => {
@@ -1146,13 +1402,6 @@ fn spawn_http_server(
             }
         }
     });
-}
-
-fn open_url(url: &str) {
-    let _ = Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,11 +1426,13 @@ fn main() {
 
     let shared = Arc::new(Mutex::new(SharedApp::new()));
     let running = Arc::new(AtomicBool::new(true));
+    let ui_dirty = Arc::new(AtomicBool::new(false));
 
     let poller_thread = spawn_smtc_poller(Arc::clone(&shared), Arc::clone(&running));
     spawn_http_server(
         Arc::clone(&shared),
         Arc::clone(&running),
+        Arc::clone(&ui_dirty),
         Arc::clone(&server),
         poller_thread.clone(),
     );
@@ -1237,7 +1488,7 @@ fn main() {
             }
         }
 
-        if let Ok(event) = TrayIconEvent::receiver().try_recv() {
+        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -1248,7 +1499,7 @@ fn main() {
             }
         }
 
-        if let Ok(event) = MenuEvent::receiver().try_recv() {
+        while let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == always_show_item.id() {
                 let checked = always_show_item.is_checked();
                 if let Ok(mut app) = shared.lock() {
@@ -1280,13 +1531,15 @@ fn main() {
             }
         }
 
-        // Keep tray checkmarks synced with web dashboard updates
-        if let Ok(app) = shared.lock() {
-            if always_show_item.is_checked() != app.config.always_show {
-                always_show_item.set_checked(app.config.always_show);
-            }
-            if startup_item.is_checked() != app.run_on_startup {
-                startup_item.set_checked(app.run_on_startup);
+        // Only lock SharedApp to sync tray checkmarks when modified via HTTP dashboard
+        if ui_dirty.swap(false, Ordering::Acquire) {
+            if let Ok(app) = shared.lock() {
+                if always_show_item.is_checked() != app.config.always_show {
+                    always_show_item.set_checked(app.config.always_show);
+                }
+                if startup_item.is_checked() != app.run_on_startup {
+                    startup_item.set_checked(app.run_on_startup);
+                }
             }
         }
 
@@ -1498,12 +1751,16 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
     border-radius: 999px;
     position: relative;
     margin-bottom: 4px;
+    overflow: hidden;
   }
 
   #bar-fill {
     height: 100%;
-    width: 0%;
+    width: 100%;
     border-radius: 999px;
+    transform-origin: left center;
+    transform: scaleX(0);
+    will-change: transform;
     background: linear-gradient(90deg, var(--accent), var(--accent2));
     box-shadow:
       0 0 6px rgba(var(--accent-r), var(--accent-g), var(--accent-b), 0.55),
@@ -1596,10 +1853,17 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
   let lastArtHash = -1;
   let lastW = null;
   let lastH = null;
+  let lastRadius = null;
+  let lastOpacity = null;
+  let lastTheme = null;
+  let lastAccentKey = "";
   let lastPosText = "";
   let lastDurText = "";
+  let lastScaleStr = "";
   let toastUntilMono = 0;
   let wasPlaying = false;
+  let isWidgetVisible = false;
+  let rafId = null;
 
   function formatTime(sec) {
     sec = Math.max(0, Math.floor(sec));
@@ -1631,6 +1895,49 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
     }
   }
 
+  function renderTimelineFrame() {
+    let curPos = state.position;
+    if (state.is_playing) {
+      const elapsed = (performance.now() - state.syncMono) / 1000.0;
+      curPos += elapsed;
+      if (state.duration > 0) curPos = Math.min(curPos, state.duration);
+    }
+
+    const posText = formatTime(curPos);
+    if (posText !== lastPosText) {
+      posEl.textContent = posText;
+      lastPosText = posText;
+    }
+
+    const durText = formatTime(state.duration);
+    if (durText !== lastDurText) {
+      durEl.textContent = durText;
+      lastDurText = durText;
+    }
+
+    const ratio = state.duration > 0 ? Math.min(1, Math.max(0, curPos / state.duration)) : 0;
+    const scaleStr = ratio.toFixed(4);
+    if (scaleStr !== lastScaleStr) {
+      barFillEl.style.transform = `scaleX(${scaleStr})`;
+      lastScaleStr = scaleStr;
+    }
+  }
+
+  function animateTimeline() {
+    rafId = null;
+    renderTimelineFrame();
+    if (state.is_playing && isWidgetVisible) {
+      rafId = requestAnimationFrame(animateTimeline);
+    }
+  }
+
+  function ensureAnimationLoop() {
+    renderTimelineFrame();
+    if (state.is_playing && isWidgetVisible && rafId === null) {
+      rafId = requestAnimationFrame(animateTimeline);
+    }
+  }
+
   async function pollServer() {
     try {
       const res = await fetch("/state", { cache: "no-store" });
@@ -1648,13 +1955,28 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
       if (urlAlwaysShow === true || cfg.always_show) finalMode = "always";
       else if (urlAlwaysShow === false && finalMode === "always") finalMode = "default";
 
-      root.style.setProperty("--w", `${finalW}px`);
-      root.style.setProperty("--h", `${finalH}px`);
-      root.style.setProperty("--radius", `${finalRadius}px`);
-      root.style.setProperty("--bg-alpha", finalOpacity);
-
-      widgetEl.classList.remove("theme-default", "theme-vinyl", "theme-glass", "theme-compact");
-      widgetEl.classList.add(`theme-${finalTheme}`);
+      const sizeChanged = (finalW !== lastW) || (finalH !== lastH);
+      if (finalW !== lastW) {
+        root.style.setProperty("--w", `${finalW}px`);
+        lastW = finalW;
+      }
+      if (finalH !== lastH) {
+        root.style.setProperty("--h", `${finalH}px`);
+        lastH = finalH;
+      }
+      if (finalRadius !== lastRadius) {
+        root.style.setProperty("--radius", `${finalRadius}px`);
+        lastRadius = finalRadius;
+      }
+      if (finalOpacity !== lastOpacity) {
+        root.style.setProperty("--bg-alpha", finalOpacity);
+        lastOpacity = finalOpacity;
+      }
+      if (finalTheme !== lastTheme) {
+        widgetEl.classList.remove("theme-default", "theme-vinyl", "theme-glass", "theme-compact");
+        widgetEl.classList.add(`theme-${finalTheme}`);
+        lastTheme = finalTheme;
+      }
 
       const nowMono = performance.now();
       const incomingPlaying = Boolean(data.is_playing);
@@ -1663,7 +1985,6 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
 
       const newTitle = data.title || "Waiting for Media...";
       const newArtist = data.artist || "";
-      const sizeChanged = (finalW !== lastW) || (finalH !== lastH);
       const trackChanged = (newTitle !== lastTitle) || (newArtist !== lastArtist);
 
       const curInterp = state.is_playing
@@ -1671,7 +1992,6 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
         : state.position;
       const drift = incomingPos - curInterp;
 
-      // Only snap timeline on track change, play/pause toggle, or user seek (> 1.5s)
       if (
         trackChanged ||
         incomingPlaying !== state.is_playing ||
@@ -1681,7 +2001,6 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
         state.position = incomingPos;
         state.syncMono = nowMono;
       } else if (incomingPlaying) {
-        // Gently nudge forward if behind, but never step backward
         state.position = Math.max(curInterp, curInterp + drift * 0.15);
         state.syncMono = nowMono;
       } else {
@@ -1714,9 +2033,6 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
         setTimeout(() => updateScrollAnimation("artist-mask", artistEl), 220);
       }
 
-      lastW = finalW;
-      lastH = finalH;
-
       const artHash = data.art_hash || 0;
       if (artHash !== lastArtHash) {
         const bgVal = artHash > 0 ? `url('/art?v=${artHash}')` : "none";
@@ -1725,15 +2041,17 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
         lastArtHash = artHash;
       }
 
-      if (data.accent && data.accent.length === 3) {
-        root.style.setProperty("--accent-r", data.accent[0]);
-        root.style.setProperty("--accent-g", data.accent[1]);
-        root.style.setProperty("--accent-b", data.accent[2]);
-      }
-      if (data.accent2 && data.accent2.length === 3) {
-        root.style.setProperty("--accent2-r", data.accent2[0]);
-        root.style.setProperty("--accent2-g", data.accent2[1]);
-        root.style.setProperty("--accent2-b", data.accent2[2]);
+      if (data.accent && data.accent.length === 3 && data.accent2 && data.accent2.length === 3) {
+        const accentKey = `${data.accent.join(",")}|${data.accent2.join(",")}`;
+        if (accentKey !== lastAccentKey) {
+          root.style.setProperty("--accent-r", data.accent[0]);
+          root.style.setProperty("--accent-g", data.accent[1]);
+          root.style.setProperty("--accent-b", data.accent[2]);
+          root.style.setProperty("--accent2-r", data.accent2[0]);
+          root.style.setProperty("--accent2-g", data.accent2[1]);
+          root.style.setProperty("--accent2-b", data.accent2[2]);
+          lastAccentKey = accentKey;
+        }
       }
 
       let shouldShow = false;
@@ -1745,41 +2063,18 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
         shouldShow = state.is_playing;
       }
 
+      isWidgetVisible = shouldShow;
       widgetEl.classList.toggle("visible", shouldShow);
+      ensureAnimationLoop();
     } catch (e) {
+      isWidgetVisible = false;
       widgetEl.classList.remove("visible");
+    } finally {
+      setTimeout(pollServer, 250);
     }
   }
 
-  function animateTimeline() {
-    let curPos = state.position;
-    if (state.is_playing) {
-      const elapsed = (performance.now() - state.syncMono) / 1000.0;
-      curPos += elapsed;
-      if (state.duration > 0) curPos = Math.min(curPos, state.duration);
-    }
-
-    const posText = formatTime(curPos);
-    if (posText !== lastPosText) {
-      posEl.textContent = posText;
-      lastPosText = posText;
-    }
-
-    const durText = formatTime(state.duration);
-    if (durText !== lastDurText) {
-      durEl.textContent = durText;
-      lastDurText = durText;
-    }
-
-    const pct = state.duration > 0 ? Math.min(100, Math.max(0, (curPos / state.duration) * 100)) : 0;
-    barFillEl.style.width = `${pct}%`;
-
-    requestAnimationFrame(animateTimeline);
-  }
-
-  setInterval(pollServer, 250);
   pollServer();
-  requestAnimationFrame(animateTimeline);
 </script>
 </body>
 </html>
@@ -1956,6 +2251,10 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
         <input id="tfmt" type="text" value="{artist} — {title}">
       </div>
       <div class="row">
+        <label for="tidle">Idle <code>/text</code> Fallback</label>
+        <input id="tidle" type="text" value="No track playing">
+      </div>
+      <div class="row">
         <label for="startup">Launch at Windows Startup</label>
         <input id="startup" type="checkbox">
       </div>
@@ -1972,8 +2271,9 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
   const wEl = el("w"), hEl = el("h"), rEl = el("r"), oEl = el("o");
   const themeEl = el("theme"), modeEl = el("mode"), toastEl = el("toast");
   const fmodeEl = el("fmode"), flistEl = el("flist");
-  const cleanEl = el("clean"), tfmtEl = el("tfmt");
+  const cleanEl = el("clean"), tfmtEl = el("tfmt"), tidleEl = el("tidle");
   const startupEl = el("startup"), preview = el("preview");
+  let lastSessionsKey = null;
 
   async function loadInitial() {
     const res = await fetch("/state", { cache: "no-store" });
@@ -1990,6 +2290,7 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
     flistEl.value = c.app_list || "";
     cleanEl.checked = c.clean_titles !== false;
     tfmtEl.value = c.text_format || "{artist} — {title}";
+    tidleEl.value = c.text_idle ?? "No track playing";
     startupEl.checked = Boolean(data.run_on_startup);
     resizePreview();
     refreshStatus(data);
@@ -2000,22 +2301,27 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
     const appLabel = data.source_app ? ` [${data.source_app}]` : "";
     el("live-sub").textContent = (data.artist || "No artist") + appLabel;
 
-    const pillBox = el("session-pills");
-    pillBox.innerHTML = "";
-    (data.active_sessions || []).forEach(app => {
-      const span = document.createElement("span");
-      span.className = "pill";
-      span.textContent = app;
-      span.onclick = () => {
-        const cur = flistEl.value.split(",").map(s => s.trim()).filter(Boolean);
-        if (!cur.includes(app)) {
-          cur.push(app);
-          flistEl.value = cur.join(", ");
-          saveLive();
-        }
-      };
-      pillBox.appendChild(span);
-    });
+    const sessions = data.active_sessions || [];
+    const sessionsKey = JSON.stringify(sessions);
+    if (sessionsKey !== lastSessionsKey) {
+      lastSessionsKey = sessionsKey;
+      const pillBox = el("session-pills");
+      pillBox.innerHTML = "";
+      sessions.forEach(app => {
+        const span = document.createElement("span");
+        span.className = "pill";
+        span.textContent = app;
+        span.onclick = () => {
+          const cur = flistEl.value.split(",").map(s => s.trim()).filter(Boolean);
+          if (!cur.includes(app)) {
+            cur.push(app);
+            flistEl.value = cur.join(", ");
+            saveLive();
+          }
+        };
+        pillBox.appendChild(span);
+      });
+    }
   }
 
   async function pollDashboard() {
@@ -2024,6 +2330,7 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
       const data = await res.json();
       refreshStatus(data);
     } catch (e) {}
+    setTimeout(pollDashboard, 1000);
   }
 
   function resizePreview() {
@@ -2050,12 +2357,12 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
         filter_mode: fmodeEl.value,
         app_list: flistEl.value,
         text_format: tfmtEl.value,
-        text_idle: "No track playing"
+        text_idle: tidleEl.value
       })
     });
   }
 
-  [wEl, hEl, rEl, oEl, themeEl, modeEl, toastEl, fmodeEl, flistEl, cleanEl, tfmtEl]
+  [wEl, hEl, rEl, oEl, themeEl, modeEl, toastEl, fmodeEl, flistEl, cleanEl, tfmtEl, tidleEl]
     .forEach(input => input.addEventListener("input", saveLive));
 
   startupEl.addEventListener("change", async () => {
@@ -2072,6 +2379,7 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
     fmodeEl.value = "all"; flistEl.value = "";
     cleanEl.checked = true;
     tfmtEl.value = "{artist} — {title}";
+    tidleEl.value = "No track playing";
     saveLive();
   });
 
@@ -2087,8 +2395,7 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
     setTimeout(() => e.target.textContent = "Copy /text Bot URL", 1500);
   });
 
-  loadInitial();
-  setInterval(pollDashboard, 1000);
+  loadInitial().then(() => setTimeout(pollDashboard, 1000));
 </script>
 </body>
 </html>

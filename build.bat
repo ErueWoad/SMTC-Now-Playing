@@ -23,6 +23,15 @@ if %errorlevel% neq 0 goto :build_error
 if not exist "dist" mkdir "dist"
 copy /Y "target\release\SMTC-Now-Playing.exe" "dist\SMTC-Now-Playing.exe" >nul
 
+if not exist "dist" mkdir "dist"
+copy /Y "target\release\SMTC-Now-Playing.exe" "dist\SMTC-Now-Playing.exe" >nul
+if %errorlevel% neq 0 (
+    echo.
+    echo [ERROR] Failed to copy executable to dist\SMTC-Now-Playing.exe ^(file may still be locked^).
+    pause
+    exit /b 1
+)
+
 echo.
 echo ===================================================
 echo  Refreshing Windows Icon Cache...
