@@ -689,7 +689,7 @@ fn create_tray_icon() -> Icon {
 }
 
 // ---------------------------------------------------------------------------
-// SMTC Session Filtering & Event-Driven Poller Thread
+// SMTC Session Filtering & Pure Event-Driven Thread
 // ---------------------------------------------------------------------------
 struct HookedManager {
     mgr: MediaManager,
@@ -742,30 +742,37 @@ struct HookedSession {
 }
 
 impl HookedSession {
-    fn new(session: MediaSession, poller_thread: &Thread) -> Self {
-        let t1 = poller_thread.clone();
-        let prop_token = session
-            .MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
-                t1.unpark();
-                Ok(())
-            }))
-            .ok();
-
-        let t2 = poller_thread.clone();
+    fn new(session: MediaSession, is_active: bool, poller_thread: &Thread) -> Self {
+        // Every allowed session hooks PlaybackInfoChanged so a background session starting playback wakes us
+        let t_play = poller_thread.clone();
         let play_token = session
             .PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
-                t2.unpark();
+                t_play.unpark();
                 Ok(())
             }))
             .ok();
 
-        let t3 = poller_thread.clone();
-        let time_token = session
-            .TimelinePropertiesChanged(&TypedEventHandler::new(move |_, _| {
-                t3.unpark();
-                Ok(())
-            }))
-            .ok();
+        let (prop_token, time_token) = if is_active {
+            let t_prop = poller_thread.clone();
+            let prop = session
+                .MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
+                    t_prop.unpark();
+                    Ok(())
+                }))
+                .ok();
+
+            let t_time = poller_thread.clone();
+            let time = session
+                .TimelinePropertiesChanged(&TypedEventHandler::new(move |_, _| {
+                    t_time.unpark();
+                    Ok(())
+                }))
+                .ok();
+
+            (prop, time)
+        } else {
+            (None, None)
+        };
 
         Self {
             session,
@@ -787,6 +794,38 @@ impl Drop for HookedSession {
         if let Some(tok) = self.time_token {
             let _ = self.session.RemoveTimelinePropertiesChanged(tok);
         }
+    }
+}
+
+struct HookedSessionList {
+    active: Option<MediaSession>,
+    items: Vec<HookedSession>,
+}
+
+impl HookedSessionList {
+    fn new(
+        allowed: &[MediaSession],
+        active: Option<&MediaSession>,
+        poller_thread: &Thread,
+    ) -> Self {
+        let items = allowed
+            .iter()
+            .map(|s| HookedSession::new(s.clone(), active == Some(s), poller_thread))
+            .collect();
+        Self {
+            active: active.cloned(),
+            items,
+        }
+    }
+
+    fn matches(&self, allowed: &[MediaSession], active: Option<&MediaSession>) -> bool {
+        self.active.as_ref() == active
+            && self.items.len() == allowed.len()
+            && self
+                .items
+                .iter()
+                .zip(allowed.iter())
+                .all(|(h, s)| &h.session == s)
     }
 }
 
@@ -852,7 +891,7 @@ fn select_session(
     mgr: &MediaManager,
     filter_mode: &str,
     app_list: &str,
-) -> (Option<MediaSession>, Vec<String>) {
+) -> (Option<MediaSession>, Vec<MediaSession>, Vec<String>) {
     let mut discovered_apps = Vec::new();
     let mut allowed_sessions = Vec::new();
 
@@ -874,20 +913,7 @@ fn select_session(
         }
     }
 
-    // Prefer a filtered session that is actively Playing
-    for s in &allowed_sessions {
-        let playing = s
-            .GetPlaybackInfo()
-            .and_then(|i| i.PlaybackStatus())
-            .map(|st| st == PlaybackStatus::Playing)
-            .unwrap_or(false);
-        if playing {
-            return (Some(s.clone()), discovered_apps);
-        }
-    }
-
-    // Otherwise check Windows default current session if it passes the filter
-    if let Ok(cur) = mgr.GetCurrentSession() {
+    let current_allowed = mgr.GetCurrentSession().ok().and_then(|cur| {
         let app_id = cur
             .SourceAppUserModelId()
             .map(|h| normalize_app_id(&h.to_string()))
@@ -896,11 +922,35 @@ fn select_session(
             discovered_apps.push(app_id.clone());
         }
         if app_matches_filter(&app_id, filter_mode, app_list) {
-            return (Some(cur), discovered_apps);
+            if !allowed_sessions.contains(&cur) {
+                allowed_sessions.push(cur.clone());
+            }
+            Some(cur)
+        } else {
+            None
+        }
+    });
+
+    // 1. Prefer a filtered session that is actively Playing
+    for s in &allowed_sessions {
+        let playing = s
+            .GetPlaybackInfo()
+            .and_then(|i| i.PlaybackStatus())
+            .map(|st| st == PlaybackStatus::Playing)
+            .unwrap_or(false);
+        if playing {
+            return (Some(s.clone()), allowed_sessions, discovered_apps);
         }
     }
 
-    (allowed_sessions.into_iter().next(), discovered_apps)
+    // 2. Otherwise check Windows default current session if it passes the filter
+    if let Some(cur) = current_allowed {
+        return (Some(cur), allowed_sessions, discovered_apps);
+    }
+
+    // 3. Fallback to first allowed session
+    let first = allowed_sessions.first().cloned();
+    (first, allowed_sessions, discovered_apps)
 }
 
 fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) -> Thread {
@@ -915,7 +965,7 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
         }
 
         let mut hooked_mgr: Option<HookedManager> = None;
-        let mut hooked_ses: Option<HookedSession> = None;
+        let mut hooked_sessions: Option<HookedSessionList> = None;
         let mut last_raw_track_key = String::new();
         let mut thumb_retries = 0u32;
         let mut cached_art_hash: u64 = 0;
@@ -944,11 +994,23 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                 }
                 let mgr = &hooked_mgr.as_ref().unwrap().mgr;
 
-                let (session_opt, active_sessions) =
+                let (session_opt, allowed_sessions, active_sessions) =
                     select_session(mgr, &filter_mode, &app_list);
 
+                // Only re-register session event hooks when the session list or active session changes
+                let hooks_match = hooked_sessions
+                    .as_ref()
+                    .map(|h| h.matches(&allowed_sessions, session_opt.as_ref()))
+                    .unwrap_or(false);
+                if !hooks_match {
+                    hooked_sessions = Some(HookedSessionList::new(
+                        &allowed_sessions,
+                        session_opt.as_ref(),
+                        &my_thread,
+                    ));
+                }
+
                 let Some(session) = session_opt else {
-                    hooked_ses = None;
                     was_playing = false;
                     if let Ok(mut app) = shared.lock() {
                         app.state.is_playing = false;
@@ -957,10 +1019,6 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                     }
                     return Ok(false);
                 };
-
-                if hooked_ses.as_ref().map(|h| &h.session) != Some(&session) {
-                    hooked_ses = Some(HookedSession::new(session.clone(), &my_thread));
-                }
 
                 let source_app = session
                     .SourceAppUserModelId()
@@ -1012,10 +1070,8 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                 let raw_track_key = format!("{source_app}||{raw_title}||{raw_artist}");
                 let is_new_track = raw_track_key != last_raw_track_key;
                 let thumb_ref = props.Thumbnail().ok();
-                let should_retry_art = !is_new_track
-                    && cached_art_hash == 0
-                    && thumb_retries < MAX_THUMBNAIL_RETRIES
-                    && thumb_ref.is_some();
+                let should_retry_art =
+                    !is_new_track && cached_art_hash == 0 && thumb_retries < MAX_THUMBNAIL_RETRIES;
 
                 if is_new_track {
                     last_raw_track_key = raw_track_key;
@@ -1032,6 +1088,7 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                 }
 
                 if is_new_track || should_retry_art {
+                    let mut loaded_art = false;
                     if let Some(ref tref) = thumb_ref {
                         if let Some(img) = read_thumbnail(tref) {
                             let (a1, a2, encoded) = process_artwork(&img);
@@ -1040,10 +1097,12 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                             if let Some((png_bytes, hash)) = encoded {
                                 cached_art_hash = hash;
                                 cached_art_bytes = Some(png_bytes);
+                                loaded_art = true;
                             }
-                        } else {
-                            thumb_retries += 1;
                         }
+                    }
+                    if !loaded_art {
+                        thumb_retries += 1;
                     }
                 }
 
@@ -1085,7 +1144,7 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                         local_anchor_pos
                     };
 
-                    // Only snap anchor on new track, play/pause toggle, or user seek (> 1.5s)
+                    // Snap anchor on new track, play/pause toggle, or user seek (> 1.5s)
                     if is_new_track
                         || (is_playing != was_playing)
                         || (smtc_pos - predicted_pos).abs() > 1.5
@@ -1133,30 +1192,33 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
             })();
 
             match step {
-                Ok(true) => {
-                    // Fast retry if waiting on delayed thumbnail; otherwise 1s since events unpark immediately
-                    let wait_ms = if cached_art_hash == 0 && thumb_retries < MAX_THUMBNAIL_RETRIES {
-                        250
+                Ok(has_active_track) => {
+                    // Only use a short timer if a track is active and its thumbnail is still loading
+                    let waiting_for_art = has_active_track
+                        && cached_art_hash == 0
+                        && thumb_retries < MAX_THUMBNAIL_RETRIES;
+
+                    if waiting_for_art {
+                        thread::park_timeout(Duration::from_millis(250));
                     } else {
-                        1000
-                    };
-                    thread::park_timeout(Duration::from_millis(wait_ms));
+                        // Pure event-driven sleep: 0% CPU until Windows fires an SMTC event or config updates
+                        thread::park();
+                    }
                 }
-                Ok(false) => thread::park_timeout(Duration::from_millis(1000)),
                 Err(_) => {
-                    hooked_ses = None;
+                    hooked_sessions = None;
                     hooked_mgr = None;
                     was_playing = false;
                     if let Ok(mut app) = shared.lock() {
                         app.state.is_playing = false;
                         app.state_updated_at = Instant::now();
                     }
-                    thread::park_timeout(Duration::from_millis(1000));
+                    thread::park_timeout(Duration::from_secs(2));
                 }
             }
         }
 
-        drop(hooked_ses);
+        drop(hooked_sessions);
         drop(hooked_mgr);
         unsafe {
             CoUninitialize();
