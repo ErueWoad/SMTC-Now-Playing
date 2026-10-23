@@ -15,7 +15,7 @@ A lightweight, native **Rust** Windows utility that reads currently playing trac
     <td align="center">
       <img src="Screens/Themes3.gif" width="100%" alt="Glass Theme">
     </td>
-    td align="center">
+    <td align="center">
       <img src="Screens/Themes4.gif" width="100%" alt="Glass Theme">
     </td>
   </tr>
