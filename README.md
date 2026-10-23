@@ -7,6 +7,10 @@ A lightweight, native **Rust** Windows utility that reads currently playing trac
 ![Screenshot 2](Screens/Screen3.png)
 ![Screenshot 2](Screens/Screen4.png)
 
+![Themes 1](Screens/Themes1.gif)
+![Themes 2](Screens/Themes2.gif)
+![Themes 3](Screens/Themes3.gif)
+
 ---
 
 ## ✨ Features
