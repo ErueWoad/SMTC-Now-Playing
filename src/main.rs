@@ -2014,8 +2014,11 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
       const finalToastSec = urlToastSec !== null ? urlToastSec : (cfg.toast_seconds || 8);
 
       let finalMode = urlMode || cfg.display_mode || "default";
-      if (urlAlwaysShow === true || cfg.always_show) finalMode = "always";
-      else if (urlAlwaysShow === false && finalMode === "always") finalMode = "default";
+      if (urlAlwaysShow === true || (urlMode === null && urlAlwaysShow === null && cfg.always_show)) {
+        finalMode = "always";
+      } else if (urlAlwaysShow === false && finalMode === "always") {
+        finalMode = "default";
+      }
 
       const sizeChanged = (finalW !== lastW) || (finalH !== lastH);
       if (finalW !== lastW) {
@@ -2192,7 +2195,32 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
   }
   input[type="number"] { width: 95px; }
   input[type="text"], select { width: 190px; }
-  .btn-row { display: flex; gap: 10px; margin-top: 14px; }
+  .url-box {
+    margin-top: 10px;
+    background: #121216;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+  .url-label {
+    font-size: 11px;
+    color: #9a9aa6;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .url-preview {
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: #00d2ff;
+    font-family: Consolas, monospace;
+    font-size: 12px;
+    outline: none;
+  }
+  .btn-row { display: flex; gap: 10px; margin-top: 12px; }
   button {
     flex: 1;
     background: #2b2b36;
@@ -2274,9 +2302,23 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
         <label for="o">Card Opacity (0.00 – 1.00)</label>
         <input id="o" type="number" min="0" max="1" step="0.05" value="1.0">
       </div>
+      <div class="row">
+        <label for="sync-global" title="Uncheck to build & preview a per-source URL without changing your saved global settings">Save edits to Global Config</label>
+        <input id="sync-global" type="checkbox" checked>
+      </div>
+
+      <div class="url-box">
+        <div class="url-label">
+          <span>Per-Source Override URL</span>
+          <span>Click to select</span>
+        </div>
+        <input id="override-url" class="url-preview" type="text" readonly onclick="this.select()">
+      </div>
+
       <div class="btn-row">
-        <button id="reset">Reset Defaults</button>
-        <button id="copy" class="primary">Copy OBS URL</button>
+        <button id="reset">Reset</button>
+        <button id="copy">Copy Global URL</button>
+        <button id="copy-override" class="primary">Copy Override URL</button>
       </div>
     </div>
 
@@ -2320,8 +2362,18 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
         <label for="startup">Launch at Windows Startup</label>
         <input id="startup" type="checkbox">
       </div>
+
+      <div class="url-box">
+        <div class="url-label">
+          <span>Custom <code>/text</code> Override URL</span>
+          <span>Click to select</span>
+        </div>
+        <input id="text-override-url" class="url-preview" type="text" readonly onclick="this.select()">
+      </div>
+
       <div class="btn-row">
-        <button id="copy-text">Copy /text Bot URL</button>
+        <button id="copy-text">Copy Base /text URL</button>
+        <button id="copy-text-override" class="primary">Copy Custom /text URL</button>
       </div>
     </div>
   </div>
@@ -2329,13 +2381,56 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
   <iframe id="preview" src="/?mode=always" width="600" height="180"></iframe>
 
 <script>
+  const BASE_URL = "http://127.0.0.1:8765";
   const el = id => document.getElementById(id);
   const wEl = el("w"), hEl = el("h"), rEl = el("r"), oEl = el("o");
   const themeEl = el("theme"), modeEl = el("mode"), toastEl = el("toast");
+  const syncGlobalEl = el("sync-global");
+  const overrideUrlEl = el("override-url"), textOverrideUrlEl = el("text-override-url");
   const fmodeEl = el("fmode"), flistEl = el("flist");
   const cleanEl = el("clean"), tfmtEl = el("tfmt"), tidleEl = el("tidle");
   const startupEl = el("startup"), preview = el("preview");
   let lastSessionsKey = null;
+
+  function buildWidgetOverrideUrl() {
+    const params = new URLSearchParams();
+    params.set("theme", themeEl.value);
+    params.set("mode", modeEl.value);
+    if (modeEl.value === "toast") {
+      params.set("toast", toastEl.value);
+    }
+    params.set("w", wEl.value);
+    params.set("h", hEl.value);
+    params.set("radius", rEl.value);
+    params.set("opacity", oEl.value);
+    return `${BASE_URL}/?${params.toString()}`;
+  }
+
+  function buildTextOverrideUrl() {
+    const fmt = tfmtEl.value.trim();
+    if (!fmt) return `${BASE_URL}/text`;
+    const params = new URLSearchParams({ format: fmt });
+    return `${BASE_URL}/text?${params.toString()}`;
+  }
+
+  function updateGeneratedUrls() {
+    overrideUrlEl.value = buildWidgetOverrideUrl();
+    textOverrideUrlEl.value = buildTextOverrideUrl();
+
+    // Update iframe preview with current parameters while keeping it visible in settings
+    const previewParams = new URLSearchParams({
+      mode: "always",
+      theme: themeEl.value,
+      w: wEl.value,
+      h: hEl.value,
+      radius: rEl.value,
+      opacity: oEl.value
+    });
+    const nextSrc = `/?${previewParams.toString()}`;
+    if (preview.getAttribute("src") !== nextSrc) {
+      preview.setAttribute("src", nextSrc);
+    }
+  }
 
   async function loadInitial() {
     const res = await fetch("/state", { cache: "no-store" });
@@ -2355,6 +2450,7 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
     tidleEl.value = c.text_idle ?? "No track playing";
     startupEl.checked = Boolean(data.run_on_startup);
     resizePreview();
+    updateGeneratedUrls();
     refreshStatus(data);
   }
 
@@ -2402,6 +2498,9 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
 
   async function saveLive() {
     resizePreview();
+    updateGeneratedUrls();
+    if (!syncGlobalEl.checked) return;
+
     const mode = modeEl.value;
     await fetch("/config", {
       method: "POST",
@@ -2427,6 +2526,10 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
   [wEl, hEl, rEl, oEl, themeEl, modeEl, toastEl, fmodeEl, flistEl, cleanEl, tfmtEl, tidleEl]
     .forEach(input => input.addEventListener("input", saveLive));
 
+  syncGlobalEl.addEventListener("change", () => {
+    if (syncGlobalEl.checked) saveLive();
+  });
+
   startupEl.addEventListener("change", async () => {
     await fetch("/startup", {
       method: "POST",
@@ -2445,17 +2548,18 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
     saveLive();
   });
 
-  el("copy").addEventListener("click", async (e) => {
-    await navigator.clipboard.writeText("http://127.0.0.1:8765/");
-    e.target.textContent = "Copied!";
-    setTimeout(() => e.target.textContent = "Copy OBS URL", 1500);
-  });
+  function bindCopyButton(btnId, getText, defaultLabel) {
+    el(btnId).addEventListener("click", async (e) => {
+      await navigator.clipboard.writeText(getText());
+      e.target.textContent = "Copied!";
+      setTimeout(() => e.target.textContent = defaultLabel, 1500);
+    });
+  }
 
-  el("copy-text").addEventListener("click", async (e) => {
-    await navigator.clipboard.writeText("http://127.0.0.1:8765/text");
-    e.target.textContent = "Copied http://127.0.0.1:8765/text!";
-    setTimeout(() => e.target.textContent = "Copy /text Bot URL", 1500);
-  });
+  bindCopyButton("copy", () => `${BASE_URL}/`, "Copy Global URL");
+  bindCopyButton("copy-override", buildWidgetOverrideUrl, "Copy Override URL");
+  bindCopyButton("copy-text", () => `${BASE_URL}/text`, "Copy Base /text URL");
+  bindCopyButton("copy-text-override", buildTextOverrideUrl, "Copy Custom /text URL");
 
   loadInitial().then(() => setTimeout(pollDashboard, 1000));
 </script>
