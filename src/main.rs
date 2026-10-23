@@ -41,7 +41,6 @@ use windows::{
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 8765;
 const MAX_THUMBNAIL_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_THUMBNAIL_RETRIES: u32 = 10;
 const WINDOWS_TO_UNIX_EPOCH_SECS: f64 = 11_644_473_600.0;
 
 // Native Win32 constants for Registry and ShellExecuteW
@@ -698,18 +697,22 @@ struct HookedManager {
 }
 
 impl HookedManager {
-    fn new(mgr: MediaManager, poller_thread: &Thread) -> Self {
+    fn new(mgr: MediaManager, poller_thread: &Thread, props_changed: &Arc<AtomicBool>) -> Self {
         let t_cur = poller_thread.clone();
+        let p_cur = Arc::clone(props_changed);
         let cur_token = mgr
             .CurrentSessionChanged(&TypedEventHandler::new(move |_, _| {
+                p_cur.store(true, Ordering::Release);
                 t_cur.unpark();
                 Ok(())
             }))
             .ok();
 
         let t_ses = poller_thread.clone();
+        let p_ses = Arc::clone(props_changed);
         let ses_token = mgr
             .SessionsChanged(&TypedEventHandler::new(move |_, _| {
+                p_ses.store(true, Ordering::Release);
                 t_ses.unpark();
                 Ok(())
             }))
@@ -736,14 +739,20 @@ impl Drop for HookedManager {
 
 struct HookedSession {
     session: MediaSession,
+    app_id: String,
     prop_token: Option<EventRegistrationToken>,
     play_token: Option<EventRegistrationToken>,
     time_token: Option<EventRegistrationToken>,
 }
 
 impl HookedSession {
-    fn new(session: MediaSession, is_active: bool, poller_thread: &Thread) -> Self {
-        // Every allowed session hooks PlaybackInfoChanged so a background session starting playback wakes us
+    fn new(
+        session: MediaSession,
+        app_id: String,
+        is_active: bool,
+        poller_thread: &Thread,
+        props_changed: &Arc<AtomicBool>,
+    ) -> Self {
         let t_play = poller_thread.clone();
         let play_token = session
             .PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
@@ -754,8 +763,10 @@ impl HookedSession {
 
         let (prop_token, time_token) = if is_active {
             let t_prop = poller_thread.clone();
+            let p_prop = Arc::clone(props_changed);
             let prop = session
                 .MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
+                    p_prop.store(true, Ordering::Release);
                     t_prop.unpark();
                     Ok(())
                 }))
@@ -776,6 +787,7 @@ impl HookedSession {
 
         Self {
             session,
+            app_id,
             prop_token,
             play_token,
             time_token,
@@ -798,34 +810,43 @@ impl Drop for HookedSession {
 }
 
 struct HookedSessionList {
-    active: Option<MediaSession>,
+    active_id: Option<String>,
     items: Vec<HookedSession>,
 }
 
 impl HookedSessionList {
     fn new(
-        allowed: &[MediaSession],
-        active: Option<&MediaSession>,
+        allowed: &[(MediaSession, String)],
+        active_id: Option<&str>,
         poller_thread: &Thread,
+        props_changed: &Arc<AtomicBool>,
     ) -> Self {
         let items = allowed
             .iter()
-            .map(|s| HookedSession::new(s.clone(), active == Some(s), poller_thread))
+            .map(|(s, id)| {
+                HookedSession::new(
+                    s.clone(),
+                    id.clone(),
+                    active_id == Some(id.as_str()),
+                    poller_thread,
+                    props_changed,
+                )
+            })
             .collect();
         Self {
-            active: active.cloned(),
+            active_id: active_id.map(str::to_owned),
             items,
         }
     }
 
-    fn matches(&self, allowed: &[MediaSession], active: Option<&MediaSession>) -> bool {
-        self.active.as_ref() == active
+    fn matches(&self, allowed: &[(MediaSession, String)], active_id: Option<&str>) -> bool {
+        self.active_id.as_deref() == active_id
             && self.items.len() == allowed.len()
             && self
                 .items
                 .iter()
                 .zip(allowed.iter())
-                .all(|(h, s)| &h.session == s)
+                .all(|(h, (_, id))| &h.app_id == id)
     }
 }
 
@@ -838,11 +859,27 @@ fn read_thumbnail(thumb_ref: &IRandomAccessStreamReference) -> Option<DynamicIma
         }
         let input_stream = stream.GetInputStreamAt(0).ok()?;
         let reader = DataReader::CreateDataReader(&input_stream).ok()?;
-        let load_ok = reader.LoadAsync(size as u32).ok()?.get().is_ok();
-        let mut buf = vec![0u8; size as usize];
-        let read_ok = load_ok && reader.ReadBytes(&mut buf).is_ok();
+        let mut buf = Vec::with_capacity(size as usize);
+
+        while (buf.len() as u64) < size {
+            let to_request = (size - buf.len() as u64).min(64 * 1024) as u32;
+            let loaded = reader.LoadAsync(to_request).ok()?.get().ok()?;
+            if loaded == 0 {
+                break;
+            }
+            let unconsumed = reader.UnconsumedBufferLength().ok()? as usize;
+            if unconsumed == 0 {
+                break;
+            }
+            let prev_len = buf.len();
+            buf.resize(prev_len + unconsumed, 0);
+            if reader.ReadBytes(&mut buf[prev_len..]).is_err() {
+                let _ = reader.Close();
+                return None;
+            }
+        }
         let _ = reader.Close();
-        if !read_ok {
+        if buf.is_empty() {
             return None;
         }
 
@@ -891,9 +928,13 @@ fn select_session(
     mgr: &MediaManager,
     filter_mode: &str,
     app_list: &str,
-) -> (Option<MediaSession>, Vec<MediaSession>, Vec<String>) {
+) -> (
+    Option<(MediaSession, String)>,
+    Vec<(MediaSession, String)>,
+    Vec<String>,
+) {
     let mut discovered_apps = Vec::new();
-    let mut allowed_sessions = Vec::new();
+    let mut allowed_sessions: Vec<(MediaSession, String)> = Vec::new();
 
     if let Ok(list) = mgr.GetSessions() {
         let count = list.Size().unwrap_or(0);
@@ -907,7 +948,7 @@ fn select_session(
                     discovered_apps.push(app_id.clone());
                 }
                 if app_matches_filter(&app_id, filter_mode, app_list) {
-                    allowed_sessions.push(s);
+                    allowed_sessions.push((s, app_id));
                 }
             }
         }
@@ -922,24 +963,28 @@ fn select_session(
             discovered_apps.push(app_id.clone());
         }
         if app_matches_filter(&app_id, filter_mode, app_list) {
-            if !allowed_sessions.contains(&cur) {
-                allowed_sessions.push(cur.clone());
+            if !allowed_sessions.iter().any(|(_, id)| id == &app_id) {
+                allowed_sessions.push((cur.clone(), app_id.clone()));
             }
-            Some(cur)
+            Some((cur, app_id))
         } else {
             None
         }
     });
 
     // 1. Prefer a filtered session that is actively Playing
-    for s in &allowed_sessions {
+    for (s, id) in &allowed_sessions {
         let playing = s
             .GetPlaybackInfo()
             .and_then(|i| i.PlaybackStatus())
             .map(|st| st == PlaybackStatus::Playing)
             .unwrap_or(false);
         if playing {
-            return (Some(s.clone()), allowed_sessions, discovered_apps);
+            return (
+                Some((s.clone(), id.clone())),
+                allowed_sessions,
+                discovered_apps,
+            );
         }
     }
 
@@ -964,10 +1009,12 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
 
+        let props_changed = Arc::new(AtomicBool::new(true));
         let mut hooked_mgr: Option<HookedManager> = None;
         let mut hooked_sessions: Option<HookedSessionList> = None;
         let mut last_raw_track_key = String::new();
-        let mut thumb_retries = 0u32;
+        let mut track_started_at = Instant::now();
+        let mut last_art_attempt: Option<Instant> = None;
         let mut cached_art_hash: u64 = 0;
         let mut cached_art_bytes: Option<Arc<[u8]>> = None;
         let mut cached_accent: [u8; 3] = [255, 15, 135];
@@ -977,6 +1024,8 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
         let mut was_playing = false;
 
         while running.load(Ordering::Relaxed) {
+            let did_props_change = props_changed.swap(false, Ordering::AcqRel);
+
             let (filter_mode, app_list, clean_titles) = if let Ok(app) = shared.lock() {
                 (
                     app.config.filter_mode.clone(),
@@ -990,27 +1039,29 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
             let step = (|| -> windows::core::Result<bool> {
                 if hooked_mgr.is_none() {
                     let mgr = MediaManager::RequestAsync()?.get()?;
-                    hooked_mgr = Some(HookedManager::new(mgr, &my_thread));
+                    hooked_mgr = Some(HookedManager::new(mgr, &my_thread, &props_changed));
                 }
                 let mgr = &hooked_mgr.as_ref().unwrap().mgr;
 
                 let (session_opt, allowed_sessions, active_sessions) =
                     select_session(mgr, &filter_mode, &app_list);
+                let active_id = session_opt.as_ref().map(|(_, id)| id.as_str());
 
-                // Only re-register session event hooks when the session list or active session changes
+                // Only re-register session event hooks when the session list or active app ID changes
                 let hooks_match = hooked_sessions
                     .as_ref()
-                    .map(|h| h.matches(&allowed_sessions, session_opt.as_ref()))
+                    .map(|h| h.matches(&allowed_sessions, active_id))
                     .unwrap_or(false);
                 if !hooks_match {
                     hooked_sessions = Some(HookedSessionList::new(
                         &allowed_sessions,
-                        session_opt.as_ref(),
+                        active_id,
                         &my_thread,
+                        &props_changed,
                     ));
                 }
 
-                let Some(session) = session_opt else {
+                let Some((session, source_app)) = session_opt else {
                     was_playing = false;
                     if let Ok(mut app) = shared.lock() {
                         app.state.is_playing = false;
@@ -1019,11 +1070,6 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                     }
                     return Ok(false);
                 };
-
-                let source_app = session
-                    .SourceAppUserModelId()
-                    .map(|h| normalize_app_id(&h.to_string()))
-                    .unwrap_or_else(|_| "Unknown".to_string());
 
                 let is_playing = session
                     .GetPlaybackInfo()
@@ -1069,13 +1115,11 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
 
                 let raw_track_key = format!("{source_app}||{raw_title}||{raw_artist}");
                 let is_new_track = raw_track_key != last_raw_track_key;
-                let thumb_ref = props.Thumbnail().ok();
-                let should_retry_art =
-                    !is_new_track && cached_art_hash == 0 && thumb_retries < MAX_THUMBNAIL_RETRIES;
 
                 if is_new_track {
                     last_raw_track_key = raw_track_key;
-                    thumb_retries = 0;
+                    track_started_at = Instant::now();
+                    last_art_attempt = None;
                     cached_accent = [255, 15, 135];
                     cached_accent2 = [0, 210, 255];
                     cached_art_hash = 0;
@@ -1087,22 +1131,24 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                     }
                 }
 
-                if is_new_track || should_retry_art {
-                    let mut loaded_art = false;
-                    if let Some(ref tref) = thumb_ref {
-                        if let Some(img) = read_thumbnail(tref) {
+                let retry_due = cached_art_hash == 0
+                    && last_art_attempt
+                        .map(|t| t.elapsed() >= Duration::from_millis(180))
+                        .unwrap_or(true);
+
+                // Attempt thumbnail load on new track, whenever MediaPropertiesChanged fires, or when retry timer is due
+                if is_new_track || did_props_change || retry_due {
+                    last_art_attempt = Some(Instant::now());
+                    if let Ok(thumb_ref) = props.Thumbnail() {
+                        if let Some(img) = read_thumbnail(&thumb_ref) {
                             let (a1, a2, encoded) = process_artwork(&img);
                             cached_accent = a1;
                             cached_accent2 = a2;
                             if let Some((png_bytes, hash)) = encoded {
                                 cached_art_hash = hash;
                                 cached_art_bytes = Some(png_bytes);
-                                loaded_art = true;
                             }
                         }
-                    }
-                    if !loaded_art {
-                        thumb_retries += 1;
                     }
                 }
 
@@ -1144,7 +1190,6 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                         local_anchor_pos
                     };
 
-                    // Snap anchor on new track, play/pause toggle, or user seek (> 1.5s)
                     if is_new_track
                         || (is_playing != was_playing)
                         || (smtc_pos - predicted_pos).abs() > 1.5
@@ -1153,7 +1198,6 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                         local_anchor_time = Instant::now();
                         position = smtc_pos;
                     } else if is_playing {
-                        // Gentle forward-only drift correction so time never steps backward
                         let corrected = predicted_pos + (smtc_pos - predicted_pos) * 0.10;
                         position = corrected.max(predicted_pos);
                         local_anchor_pos = position;
@@ -1193,15 +1237,14 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
 
             match step {
                 Ok(has_active_track) => {
-                    // Only use a short timer if a track is active and its thumbnail is still loading
+                    // Actively poll every 250ms for up to 15s while waiting on missing artwork
                     let waiting_for_art = has_active_track
                         && cached_art_hash == 0
-                        && thumb_retries < MAX_THUMBNAIL_RETRIES;
+                        && track_started_at.elapsed() < Duration::from_secs(15);
 
                     if waiting_for_art {
                         thread::park_timeout(Duration::from_millis(250));
                     } else {
-                        // Pure event-driven sleep: 0% CPU until Windows fires an SMTC event or config updates
                         thread::park();
                     }
                 }

@@ -1,6 +1,6 @@
 [package]
 name = "smtc-now-playing"
-version = "2.2.1"
+version = "2.2.2"
 edition = "2021"
 build = "build.rs"
 
@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 arboard = "3.4"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp", "gif", "ico"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tiny_http = "0.12"
