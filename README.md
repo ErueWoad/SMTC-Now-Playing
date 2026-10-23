@@ -2,11 +2,6 @@
 
 A lightweight, native **Rust** Windows utility that reads currently playing track metadata via **Windows System Media Transport Controls (SMTC)** and serves a sleek, customizable "Now Playing" overlay as a local **OBS Browser Source**.
 
-![Screenshot 1](Screens/Screen1.png)
-![Screenshot 2](Screens/Screen2.png)
-![Screenshot 2](Screens/Screen3.png)
-![Screenshot 2](Screens/Screen4.png)
-
 <table>
   <tr>
     <td align="center">
@@ -19,6 +14,9 @@ A lightweight, native **Rust** Windows utility that reads currently playing trac
   <tr>
     <td align="center">
       <img src="Screens/Themes3.gif" width="100%" alt="Glass Theme">
+    </td>
+    td align="center">
+      <img src="Screens/Themes4.gif" width="100%" alt="Glass Theme">
     </td>
   </tr>
 </table>
