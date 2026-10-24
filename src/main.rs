@@ -2188,258 +2188,1089 @@ const WIDGET_HTML: &str = r#"<!DOCTYPE html>
 </html>
 "#;
 
-const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
+const SETTINGS_HTML: &str = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SMTC Now Playing — Settings</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg-sidebar: #141418;
+    --bg-stage: #0d0d10;
+    --bg-card: #1c1c22;
+    --bg-input: #25252d;
+    --bg-input-hover: #2d2d37;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-focus: #ff0f87;
+    --accent: #ff0f87;
+    --accent-hover: #ff2a95;
+    --accent-2: #00d2ff;
+    --text-main: #f2f2f7;
+    --text-muted: #9494a3;
+    --text-dim: #686878;
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
   body {
-    background: #121216;
-    color: #f0f0f5;
-    font-family: "Segoe UI", -apple-system, sans-serif;
-    padding: 24px;
+    background: var(--bg-stage);
+    color: var(--text-main);
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+    display: flex;
+  }
+
+  /* -------------------------------------------------------------------------
+     Left Sidebar
+     ------------------------------------------------------------------------- */
+  .sidebar {
+    width: 460px;
+    min-width: 400px;
+    max-width: 100%;
+    height: 100vh;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    z-index: 10;
+  }
+
+  .sidebar-top {
+    padding: 18px 20px 14px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(20, 20, 24, 0.96);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .brand-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .brand-title {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    color: #fff;
+  }
+
+  .brand-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+  }
+
+  .url-mode-tabs {
+    display: flex;
+    gap: 4px;
+    background: var(--bg-card);
+    padding: 3px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+  }
+
+  .url-tab {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .url-tab.active {
+    background: var(--bg-input-hover);
+    color: #fff;
+  }
+
+  /* Click to Copy URL Box */
+  .copy-url-box {
+    position: relative;
+    width: 100%;
+    background: #0d0d10;
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    cursor: pointer;
+    overflow: hidden;
+    transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  }
+
+  .copy-url-box:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(255, 15, 135, 0.18);
+  }
+
+  .copy-url-text {
+    font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+    font-size: 12px;
+    color: var(--accent-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+  }
+
+  .copy-url-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(255, 15, 135, 0.92);
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.16s ease;
+  }
+
+  .copy-url-box:hover .copy-url-overlay,
+  .copy-url-box.copied .copy-url-overlay {
+    opacity: 1;
+  }
+
+  .copy-url-box.copied .copy-url-overlay {
+    background: #10b981;
+  }
+
+  .top-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .btn {
+    background: var(--bg-input);
+    color: var(--text-main);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.08s ease;
+    text-align: center;
+  }
+
+  .btn:hover {
+    background: var(--bg-input-hover);
+    border-color: rgba(255, 255, 255, 0.18);
+  }
+
+  .btn:active {
+    transform: translateY(1px);
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  .btn-primary:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  .btn-danger {
+    background: #e11d48;
+    border-color: #e11d48;
+    color: #fff;
+  }
+
+  .btn-danger:hover {
+    background: #f43f5e;
+  }
+
+  /* Scrollable Settings Body */
+  .sidebar-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px 20px 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .sidebar-content::-webkit-scrollbar {
+    width: 6px;
+  }
+  .sidebar-content::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .sidebar-content::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+  }
+
+  .section {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .section-header {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.9px;
+    color: var(--accent);
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .setting-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .setting-item.column {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .setting-item.hidden {
+    display: none;
+  }
+
+  .setting-info {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .setting-label {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text-main);
+  }
+
+  .setting-desc {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.35;
+  }
+
+  .setting-control {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  select,
+  input[type="text"],
+  input[type="number"] {
+    color-scheme: dark;
+	background: var(--bg-input);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-sm);
+    padding: 7px 10px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+
+  select:focus,
+  input[type="text"]:focus,
+  input[type="number"]:focus {
+    border-color: var(--accent);
+    background: var(--bg-input-hover);
+  }
+
+  select {
+    min-width: 185px;
+    cursor: pointer;
+  }
+
+  input[type="number"] {
+    width: 78px;
+    text-align: left;
+  }
+
+  input[type="text"].full-input {
+    width: 100%;
+  }
+
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 105px;
+    height: 5px;
+    background: var(--bg-input);
+    border-radius: 999px;
+    outline: none;
+    cursor: pointer;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid #fff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  }
+
+  /* Modern Pill Toggle Switch */
+  .switch {
+    position: relative;
+    display: inline-block;
+    width: 42px;
+    height: 24px;
+    flex-shrink: 0;
+  }
+
+  .switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background-color: var(--bg-input);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    transition: 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+    border-radius: 999px;
+  }
+
+  .slider::before {
+    position: absolute;
+    content: "";
+    height: 16px;
+    width: 16px;
+    left: 3px;
+    bottom: 3px;
+    background-color: #c9c9d6;
+    transition: 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+    border-radius: 50%;
+  }
+
+  .switch input:checked + .slider {
+    background-color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .switch input:checked + .slider::before {
+    transform: translateX(18px);
+    background-color: #fff;
+  }
+
+  /* Expandable Active Sources Drawer */
+  .link-btn {
+    background: none;
+    border: none;
+    color: var(--accent-2);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .link-btn:hover {
+    text-decoration: underline;
+  }
+
+  .sources-drawer {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .sources-drawer.open {
+    display: flex;
+  }
+
+  .pill-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .pill {
+    font-size: 11.5px;
+    background: var(--bg-input);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 4px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+    color: var(--text-main);
+    transition: all 0.14s ease;
+  }
+
+  .pill:hover {
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  .pill.active {
+    background: rgba(255, 15, 135, 0.2);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  .token-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .token-chip {
+    font-family: Consolas, monospace;
+    font-size: 11px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 2px 7px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .token-chip:hover {
+    color: #fff;
+    border-color: var(--accent-2);
+  }
+
+  .bridge-grid {
+    display: grid;
+    grid-template-columns: 1fr 110px;
+    gap: 8px;
+  }
+
+  .readonly-box {
+    background: #101014;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 7px 10px;
+    font-family: Consolas, monospace;
+    font-size: 12.5px;
+    color: var(--text-muted);
+  }
+
+  /* -------------------------------------------------------------------------
+     Right Preview Stage
+     ------------------------------------------------------------------------- */
+  .stage {
+    flex: 1;
+    height: 100vh;
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 20px;
+    justify-content: center;
+    overflow: hidden;
+    transition: background 0.2s ease;
   }
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-    gap: 18px;
-    width: 100%;
-    max-width: 960px;
+
+  .stage.bg-checker {
+    background-image: repeating-conic-gradient(#121217 0% 25%, #181820 0% 50%);
+    background-size: 24px 24px;
   }
-  .card {
-    background: #1b1b22;
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 12px;
-    padding: 20px;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+
+  .stage.bg-dark {
+    background: #09090b;
   }
-  h2 { font-size: 16px; margin-bottom: 14px; color: #ff0f87; text-transform: uppercase; letter-spacing: 0.5px; }
-  .row {
+
+  .stage.bg-light {
+    background: #e4e4e7;
+  }
+
+  .stage.bg-green {
+    background: #00b140;
+  }
+
+  .stage-top-bar {
+    position: absolute;
+    top: 18px;
+    right: 20px;
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    margin-bottom: 12px;
-    gap: 12px;
+    gap: 6px;
+    background: rgba(20, 20, 24, 0.88);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--border);
+    padding: 5px 8px;
+    border-radius: var(--radius-md);
+    z-index: 5;
   }
-  label { font-size: 13.5px; font-weight: 500; color: #d8d8e2; }
-  input[type="number"], input[type="text"], select {
-    background: #121216;
-    color: #fff;
-    border: 1px solid rgba(255,255,255,0.15);
-    border-radius: 6px;
-    padding: 6px 10px;
-    font-size: 13.5px;
-  }
-  input[type="number"] { width: 95px; }
-  input[type="text"], select { width: 190px; }
-  .url-box {
-    margin-top: 10px;
-    background: #121216;
-    border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 8px;
-    padding: 8px 10px;
-  }
-  .url-label {
+
+  .stage-top-label {
     font-size: 11px;
-    color: #9a9aa6;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    margin-bottom: 4px;
-    display: flex;
-    justify-content: space-between;
-  }
-  .url-preview {
-    width: 100%;
-    background: transparent;
-    border: none;
-    color: #00d2ff;
-    font-family: Consolas, monospace;
-    font-size: 12px;
-    outline: none;
-  }
-  .btn-row { display: flex; gap: 10px; margin-top: 12px; }
-  button {
-    flex: 1;
-    background: #2b2b36;
-    color: #fff;
-    border: 1px solid rgba(255,255,255,0.1);
-    padding: 8px 12px;
-    border-radius: 6px;
-    cursor: pointer;
+    color: var(--text-muted);
+    margin-right: 4px;
     font-weight: 600;
-    font-size: 13px;
   }
-  button.primary { background: #ff0f87; border-color: #ff0f87; }
-  button:hover { filter: brightness(1.12); }
-  .status-bar {
-    background: #14141a;
-    border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 8px;
-    padding: 10px 14px;
-    margin-bottom: 14px;
-  }
-  .now-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .now-sub { font-size: 12px; color: #9a9aa6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
-  .pill-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-  .pill {
-    font-size: 11.5px;
-    background: #262631;
-    border: 1px solid rgba(255,255,255,0.12);
-    padding: 3px 8px;
-    border-radius: 999px;
+
+  .bg-swatch {
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: var(--bg-input);
+    color: var(--text-main);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 8px;
+    border-radius: 5px;
     cursor: pointer;
-    color: #cfd0dc;
   }
-  .pill:hover { border-color: #ff0f87; color: #fff; }
-  iframe {
-    border: 1px dashed rgba(255,255,255,0.15);
-    border-radius: 12px;
-    background: repeating-conic-gradient(#18181f 0% 25%, #202029 0% 50%) 50% / 20px 20px;
+
+  .bg-swatch.active {
+    border-color: var(--accent);
+    background: rgba(255, 15, 135, 0.22);
+    color: #fff;
+  }
+
+  .preview-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    max-width: 100%;
+    max-height: calc(100vh - 120px);
+    overflow: auto;
+  }
+
+  iframe#preview {
+    border: none;
+    background: transparent;
+    overflow: hidden;
+    transition: width 0.2s ease, height 0.2s ease;
+  }
+
+  .stage-hud {
+    position: absolute;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(20, 20, 24, 0.9);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 8px 18px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 90%;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  }
+
+  .status-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #71717a;
+    flex-shrink: 0;
+  }
+
+  .status-indicator.playing {
+    background: #10b981;
+    box-shadow: 0 0 8px #10b981;
+  }
+
+  .hud-track {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 360px;
+  }
+
+  .hud-app-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent-2);
+    background: rgba(0, 210, 255, 0.12);
+    border: 1px solid rgba(0, 210, 255, 0.25);
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+
+  /* -------------------------------------------------------------------------
+     Modals (Load Settings & Load Defaults)
+     ------------------------------------------------------------------------- */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(4px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 20px;
+  }
+
+  .modal-backdrop.open {
+    display: flex;
+  }
+
+  .modal {
+    background: var(--bg-sidebar);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-lg);
+    width: 100%;
+    max-width: 440px;
+    padding: 22px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .modal-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #fff;
+  }
+
+  .modal-desc {
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  @media (max-width: 900px) {
+    body {
+      flex-direction: column;
+      overflow-y: auto;
+      height: auto;
+    }
+    .sidebar {
+      width: 100%;
+      height: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    .stage {
+      min-height: 360px;
+      height: auto;
+      padding: 60px 16px;
+    }
   }
 </style>
 </head>
 <body>
-  <div class="grid">
-    <div class="card">
-      <h2>Style, Theme & Dimensions</h2>
-      <div class="row">
-        <label for="theme">Visual Theme</label>
-        <select id="theme">
-          <option value="default">Default (Dual-Tone Glow)</option>
-          <option value="vinyl">Vinyl (Spinning Record)</option>
-          <option value="glass">Glass (Frosted Art Blur)</option>
-          <option value="compact">Compact (Minimal Bar)</option>
-        </select>
-      </div>
-      <div class="row">
-        <label for="mode">Visibility Mode</label>
-        <select id="mode">
-          <option value="default">Show While Playing</option>
-          <option value="always">Always Show</option>
-          <option value="toast">Track Change Toast</option>
-        </select>
-      </div>
-      <div class="row">
-        <label for="toast">Toast Duration (3 – 60 s)</label>
-        <input id="toast" type="number" min="3" max="60" step="1" value="8">
-      </div>
-      <div class="row">
-        <label for="w">Width (260 – 1920 px)</label>
-        <input id="w" type="number" min="260" max="1920" step="10" value="510">
-      </div>
-      <div class="row">
-        <label for="h">Height (80 – 600 px)</label>
-        <input id="h" type="number" min="80" max="600" step="4" value="122">
-      </div>
-      <div class="row">
-        <label for="r">Corner Radius (0 – 60 px)</label>
-        <input id="r" type="number" min="0" max="60" step="1" value="10">
-      </div>
-      <div class="row">
-        <label for="o">Card Opacity (0.00 – 1.00)</label>
-        <input id="o" type="number" min="0" max="1" step="0.05" value="1.0">
-      </div>
-      <div class="row">
-        <label for="sync-global" title="Uncheck to build & preview a per-source URL without changing your saved global settings">Save edits to Global Config</label>
-        <input id="sync-global" type="checkbox" checked>
-      </div>
 
-      <div class="url-box">
-        <div class="url-label">
-          <span>Per-Source Override URL</span>
-          <span>Click to select</span>
+  <!-- LEFT CONFIGURATOR SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-top">
+      <div class="brand-row">
+        <div class="brand-title">
+          <span class="brand-dot"></span>
+          <span>SMTC Now Playing</span>
         </div>
-        <input id="override-url" class="url-preview" type="text" readonly onclick="this.select()">
+        <div class="url-mode-tabs" title="Choose which URL to display and copy">
+          <button type="button" class="url-tab active" data-url-mode="override">Widget URL</button>
+          <button type="button" class="url-tab" data-url-mode="global">Global</button>
+          <button type="button" class="url-tab" data-url-mode="text">/text</button>
+        </div>
       </div>
 
-      <div class="btn-row">
-        <button id="reset">Reset</button>
-        <button id="copy">Copy Global URL</button>
-        <button id="copy-override" class="primary">Copy Override URL</button>
+      <div class="copy-url-box" id="copy-url-box" title="Click to copy URL">
+        <div class="copy-url-text" id="top-url-display">http://127.0.0.1:8765/</div>
+        <div class="copy-url-overlay" id="copy-url-overlay">Click to copy URL</div>
+      </div>
+
+      <div class="top-actions">
+        <button type="button" class="btn" id="btn-open-defaults">Load Default Settings</button>
+        <button type="button" class="btn" id="btn-open-load">Load Settings</button>
       </div>
     </div>
 
-    <div class="card">
-      <h2>Session Filtering & Stream Tools</h2>
-      <div class="status-bar">
-        <div class="now-title" id="live-title">Waiting for Media...</div>
-        <div class="now-sub" id="live-sub">No active session</div>
-      </div>
+    <div class="sidebar-content">
+      <!-- APPEARANCE -->
+      <div class="section">
+        <div class="section-header">Appearance</div>
 
-      <div class="row">
-        <label for="fmode">App Session Filter</label>
-        <select id="fmode">
-          <option value="all">All Media Apps</option>
-          <option value="allow">Only Allow Listed</option>
-          <option value="block">Block Listed Apps</option>
-        </select>
-      </div>
-      <div class="row">
-        <label for="flist">App Filter Keywords</label>
-        <input id="flist" type="text" placeholder="e.g. Spotify, chrome">
-      </div>
-      <div style="margin-bottom: 12px;">
-        <div style="font-size:11.5px; color:#8e8ea0;">Detected Apps (click to add to filter):</div>
-        <div class="pill-list" id="session-pills"></div>
-      </div>
-
-      <div class="row">
-        <label for="clean">Clean Noisy Video Titles</label>
-        <input id="clean" type="checkbox" checked>
-      </div>
-      <div class="row">
-        <label for="tfmt">Chat Bot <code>/text</code> Format</label>
-        <input id="tfmt" type="text" value="{artist} — {title}">
-      </div>
-      <div class="row">
-        <label for="tidle">Idle <code>/text</code> Fallback</label>
-        <input id="tidle" type="text" value="No track playing">
-      </div>
-      <div class="row">
-        <label for="startup">Launch at Windows Startup</label>
-        <input id="startup" type="checkbox">
-      </div>
-
-      <div class="url-box">
-        <div class="url-label">
-          <span>Custom <code>/text</code> Override URL</span>
-          <span>Click to select</span>
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="theme">Theme</label>
+            <div class="setting-desc">Visual layout preset for the browser source</div>
+          </div>
+          <div class="setting-control">
+            <select id="theme">
+              <option value="default">Standard (Dual-Tone Glow)</option>
+              <option value="vinyl">Vinyl (Spinning Record)</option>
+              <option value="glass">Glass (Frosted Art Blur)</option>
+              <option value="compact">Compact (Minimal Bar)</option>
+            </select>
+          </div>
         </div>
-        <input id="text-override-url" class="url-preview" type="text" readonly onclick="this.select()">
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="w">Widget Width</label>
+            <div class="setting-desc">Horizontal width in pixels (260 – 1920)</div>
+          </div>
+          <div class="setting-control">
+            <input id="w-range" type="range" min="260" max="1200" step="10" value="510">
+            <input id="w" type="number" min="260" max="1920" step="10" value="510">
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="h">Widget Height</label>
+            <div class="setting-desc">Vertical height in pixels (80 – 600)</div>
+          </div>
+          <div class="setting-control">
+            <input id="h-range" type="range" min="80" max="320" step="2" value="122">
+            <input id="h" type="number" min="80" max="600" step="2" value="122">
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="r">Corner Radius</label>
+            <div class="setting-desc">Card border roundness in pixels (0 – 60)</div>
+          </div>
+          <div class="setting-control">
+            <input id="r-range" type="range" min="0" max="60" step="1" value="10">
+            <input id="r" type="number" min="0" max="60" step="1" value="10">
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="o">Card Opacity</label>
+            <div class="setting-desc">Background surface opacity (0.00 – 1.00)</div>
+          </div>
+          <div class="setting-control">
+            <input id="o-range" type="range" min="0" max="1" step="0.05" value="1.0">
+            <input id="o" type="number" min="0" max="1" step="0.05" value="1.0">
+          </div>
+        </div>
       </div>
 
-      <div class="btn-row">
-        <button id="copy-text">Copy Base /text URL</button>
-        <button id="copy-text-override" class="primary">Copy Custom /text URL</button>
+      <!-- GENERAL -->
+      <div class="section">
+        <div class="section-header">General</div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="show-paused">Show While Paused</label>
+            <div class="setting-desc">If enabled, the widget will be visible even when the track is paused.</div>
+          </div>
+          <div class="setting-control">
+            <label class="switch">
+              <input id="show-paused" type="checkbox">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="auto-hide-toast">Auto-Hide on Track Change</label>
+            <div class="setting-desc">If enabled, the widget will show for a set duration whenever a new track starts.</div>
+          </div>
+          <div class="setting-control">
+            <label class="switch">
+              <input id="auto-hide-toast" type="checkbox">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="setting-item hidden" id="toast-duration-row">
+          <div class="setting-info">
+            <label class="setting-label" for="toast">Display Duration (seconds)</label>
+            <div class="setting-desc">How long the widget should remain visible.</div>
+          </div>
+          <div class="setting-control">
+            <input id="toast" type="number" min="3" max="60" step="1" value="8">
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="clean">Clean Noisy Video Titles</label>
+            <div class="setting-desc">Strips tags like (Official Music Video), [Lyrics], and platform suffixes.</div>
+          </div>
+          <div class="setting-control">
+            <label class="switch">
+              <input id="clean" type="checkbox" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- SOURCE FILTERING -->
+      <div class="section">
+        <div class="section-header">App Source Filtering</div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="fmode">Filter Mode</label>
+            <div class="setting-desc">Control which Windows media sessions are tracked</div>
+          </div>
+          <div class="setting-control">
+            <select id="fmode">
+              <option value="all">Track All Media Apps</option>
+              <option value="allow">Included Apps Only</option>
+              <option value="block">Excluded Apps</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-item column">
+          <div class="setting-info">
+            <label class="setting-label" id="flist-label" for="flist">App Filter List</label>
+            <div class="setting-desc" id="flist-desc">Comma-separated app names or keywords (e.g. Spotify, chrome).</div>
+          </div>
+          <input id="flist" class="full-input" type="text" placeholder="e.g. Spotify.exe, chrome.exe">
+          <button type="button" class="link-btn" id="toggle-sources-btn">View active sources ▾</button>
+          <div class="sources-drawer" id="sources-drawer">
+            <div class="setting-desc">Click an active media source to add or remove it:</div>
+            <div class="pill-list" id="session-pills"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CHAT BOT / TEXT ENDPOINT -->
+      <div class="section">
+        <div class="section-header">Chat Bot Plaintext (/text)</div>
+
+        <div class="setting-item column">
+          <div class="setting-info">
+            <label class="setting-label" for="tfmt">Format Template</label>
+            <div class="setting-desc">Plaintext response served at <code>http://127.0.0.1:8765/text</code></div>
+          </div>
+          <input id="tfmt" class="full-input" type="text" value="{artist} — {title}">
+          <div class="token-chips">
+            <span class="token-chip" data-token="{title}">{title}</span>
+            <span class="token-chip" data-token="{artist}">{artist}</span>
+            <span class="token-chip" data-token="{album}">{album}</span>
+            <span class="token-chip" data-token="{pos}">{pos}</span>
+            <span class="token-chip" data-token="{dur}">{dur}</span>
+            <span class="token-chip" data-token="{app}">{app}</span>
+            <span class="token-chip" data-token="{status}">{status}</span>
+          </div>
+        </div>
+
+        <div class="setting-item column">
+          <div class="setting-info">
+            <label class="setting-label" for="tidle">Idle Fallback Text</label>
+            <div class="setting-desc">Returned by <code>/text</code> when no media is playing</div>
+          </div>
+          <input id="tidle" class="full-input" type="text" value="No track playing">
+        </div>
+      </div>
+
+      <!-- SMTC BRIDGE & SYSTEM -->
+      <div class="section">
+        <div class="section-header">SMTC Bridge &amp; System</div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="startup">Launch at Windows Startup</label>
+            <div class="setting-desc">Automatically start in the system tray when you sign in.</div>
+          </div>
+          <div class="setting-control">
+            <label class="switch">
+              <input id="startup" type="checkbox">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="sync-global">Save Edits to Global Config</label>
+            <div class="setting-desc">Uncheck to build a per-source URL without overwriting saved global defaults.</div>
+          </div>
+          <div class="setting-control">
+            <label class="switch">
+              <input id="sync-global" type="checkbox" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="setting-item column">
+          <div class="setting-info">
+            <div class="setting-label">Local Server Endpoint</div>
+            <div class="setting-desc">Address and port serving OBS Browser Sources</div>
+          </div>
+          <div class="bridge-grid">
+            <div class="readonly-box">127.0.0.1</div>
+            <div class="readonly-box">8765</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- RIGHT LIVE PREVIEW STAGE -->
+  <main class="stage bg-checker" id="stage">
+    <div class="stage-top-bar">
+      <span class="stage-top-label">Preview Backdrop:</span>
+      <button type="button" class="bg-swatch active" data-bg="bg-checker">Grid</button>
+      <button type="button" class="bg-swatch" data-bg="bg-dark">Dark</button>
+      <button type="button" class="bg-swatch" data-bg="bg-light">Light</button>
+      <button type="button" class="bg-swatch" data-bg="bg-green">Chroma</button>
+    </div>
+
+    <div class="preview-wrapper">
+      <iframe id="preview" src="/?mode=always" width="550" height="162"></iframe>
+    </div>
+
+    <div class="stage-hud">
+      <span class="status-indicator" id="hud-dot"></span>
+      <span class="hud-track" id="live-title">Waiting for Media...</span>
+      <span class="hud-app-badge" id="live-sub">Idle</span>
+    </div>
+  </main>
+
+  <!-- MODAL: LOAD SETTINGS FROM URL -->
+  <div class="modal-backdrop" id="modal-load">
+    <div class="modal">
+      <div class="modal-title">Load Settings</div>
+      <div class="modal-desc">Paste in your existing widget URL to import its theme, dimensions, and visibility settings:</div>
+      <input id="import-url-input" class="full-input" type="text" placeholder="http://127.0.0.1:8765/?theme=vinyl&w=510...">
+      <div class="modal-actions">
+        <button type="button" class="btn" id="btn-cancel-load">Cancel</button>
+        <button type="button" class="btn btn-primary" id="btn-confirm-load">Load Settings</button>
       </div>
     </div>
   </div>
 
-  <iframe id="preview" src="/?mode=always" width="600" height="180"></iframe>
+  <!-- MODAL: LOAD DEFAULTS CONFIRMATION -->
+  <div class="modal-backdrop" id="modal-defaults">
+    <div class="modal">
+      <div class="modal-title">Load Defaults</div>
+      <div class="modal-desc">Are you sure you want to reset all widget settings back to their defaults?</div>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="btn-cancel-defaults">No</button>
+        <button type="button" class="btn btn-danger" id="btn-confirm-defaults">Yes</button>
+      </div>
+    </div>
+  </div>
 
 <script>
   const BASE_URL = "http://127.0.0.1:8765";
   const el = id => document.getElementById(id);
-  const wEl = el("w"), hEl = el("h"), rEl = el("r"), oEl = el("o");
-  const themeEl = el("theme"), modeEl = el("mode"), toastEl = el("toast");
-  const syncGlobalEl = el("sync-global");
-  const overrideUrlEl = el("override-url"), textOverrideUrlEl = el("text-override-url");
+
+  const wEl = el("w"), wRangeEl = el("w-range");
+  const hEl = el("h"), hRangeEl = el("h-range");
+  const rEl = el("r"), rRangeEl = el("r-range");
+  const oEl = el("o"), oRangeEl = el("o-range");
+
+  const themeEl = el("theme");
+  const showPausedEl = el("show-paused");
+  const autoHideToastEl = el("auto-hide-toast");
+  const toastRowEl = el("toast-duration-row");
+  const toastEl = el("toast");
+
   const fmodeEl = el("fmode"), flistEl = el("flist");
   const cleanEl = el("clean"), tfmtEl = el("tfmt"), tidleEl = el("tidle");
-  const startupEl = el("startup"), preview = el("preview");
+  const startupEl = el("startup"), syncGlobalEl = el("sync-global");
+  const preview = el("preview");
+
+  const topUrlDisplay = el("top-url-display");
+  const copyUrlBox = el("copy-url-box");
+  const copyUrlOverlay = el("copy-url-overlay");
+
+  let activeUrlTab = "override"; // "override" | "global" | "text"
   let lastSessionsKey = null;
 
+  function getDisplayMode() {
+    if (autoHideToastEl.checked) return "toast";
+    if (showPausedEl.checked) return "always";
+    return "default";
+  }
+
+  function applyDisplayModeToToggles(mode) {
+    if (mode === "always") {
+      showPausedEl.checked = true;
+      autoHideToastEl.checked = false;
+    } else if (mode === "toast") {
+      showPausedEl.checked = false;
+      autoHideToastEl.checked = true;
+    } else {
+      showPausedEl.checked = false;
+      autoHideToastEl.checked = false;
+    }
+    updateConditionalRows();
+  }
+
+  function updateConditionalRows() {
+    toastRowEl.classList.toggle("hidden", !autoHideToastEl.checked);
+    const fmode = fmodeEl.value;
+    if (fmode === "allow") {
+      el("flist-label").textContent = "Included Apps";
+      el("flist-desc").textContent = "Only apps matching these keywords will be displayed.";
+    } else if (fmode === "block") {
+      el("flist-label").textContent = "Excluded Apps";
+      el("flist-desc").textContent = "Apps matching these keywords will never be displayed.";
+    } else {
+      el("flist-label").textContent = "App Filter Keywords";
+      el("flist-desc").textContent = "Select 'Included' or 'Excluded' above to filter by app keywords.";
+    }
+  }
+
+  function syncRangeAndNumber(source, target) {
+    target.value = source.value;
+  }
+
   function buildWidgetOverrideUrl() {
+    const mode = getDisplayMode();
     const params = new URLSearchParams();
     params.set("theme", themeEl.value);
-    params.set("mode", modeEl.value);
-    if (modeEl.value === "toast") {
+    params.set("mode", mode);
+    if (mode === "toast") {
       params.set("toast", toastEl.value);
     }
     params.set("w", wEl.value);
@@ -2456,11 +3287,15 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
     return `${BASE_URL}/text?${params.toString()}`;
   }
 
-  function updateGeneratedUrls() {
-    overrideUrlEl.value = buildWidgetOverrideUrl();
-    textOverrideUrlEl.value = buildTextOverrideUrl();
+  function getActiveUrlString() {
+    if (activeUrlTab === "global") return `${BASE_URL}/`;
+    if (activeUrlTab === "text") return buildTextOverrideUrl();
+    return buildWidgetOverrideUrl();
+  }
 
-    // Update iframe preview with current parameters while keeping it visible in settings
+  function updateGeneratedUrls() {
+    topUrlDisplay.textContent = getActiveUrlString();
+
     const previewParams = new URLSearchParams({
       mode: "always",
       theme: themeEl.value,
@@ -2475,50 +3310,81 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
     }
   }
 
+  function resizePreview() {
+    preview.width = Math.max(300, Number(wEl.value) + 28);
+    preview.height = Math.max(110, Number(hEl.value) + 28);
+  }
+
   async function loadInitial() {
     const res = await fetch("/state", { cache: "no-store" });
     const data = await res.json();
     const c = data.config || {};
-    wEl.value = c.width ?? 510;
-    hEl.value = c.height ?? 122;
-    rEl.value = c.radius ?? 10;
-    oEl.value = c.opacity ?? 1.0;
+
+    wEl.value = wRangeEl.value = c.width ?? 510;
+    hEl.value = hRangeEl.value = c.height ?? 122;
+    rEl.value = rRangeEl.value = c.radius ?? 10;
+    oEl.value = oRangeEl.value = c.opacity ?? 1.0;
+
     themeEl.value = c.theme || "default";
-    modeEl.value = c.display_mode || (c.always_show ? "always" : "default");
     toastEl.value = c.toast_seconds ?? 8;
+
+    const mode = c.display_mode || (c.always_show ? "always" : "default");
+    applyDisplayModeToToggles(mode);
+
     fmodeEl.value = c.filter_mode || "all";
     flistEl.value = c.app_list || "";
     cleanEl.checked = c.clean_titles !== false;
     tfmtEl.value = c.text_format || "{artist} — {title}";
     tidleEl.value = c.text_idle ?? "No track playing";
     startupEl.checked = Boolean(data.run_on_startup);
+
+    updateConditionalRows();
     resizePreview();
     updateGeneratedUrls();
     refreshStatus(data);
   }
 
   function refreshStatus(data) {
-    el("live-title").textContent = data.title || "Waiting for Media...";
-    const appLabel = data.source_app ? ` [${data.source_app}]` : "";
-    el("live-sub").textContent = (data.artist || "No artist") + appLabel;
+    const isPlaying = Boolean(data.is_playing);
+    el("hud-dot").classList.toggle("playing", isPlaying);
+
+    const artist = data.artist ? `${data.artist} — ` : "";
+    el("live-title").textContent = data.title ? `${artist}${data.title}` : "Waiting for Media...";
+    el("live-sub").textContent = data.source_app || (isPlaying ? "Playing" : "Idle");
 
     const sessions = data.active_sessions || [];
-    const sessionsKey = JSON.stringify(sessions);
+    const currentTokens = flistEl.value.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+    const sessionsKey = JSON.stringify({ sessions, currentTokens });
+
     if (sessionsKey !== lastSessionsKey) {
       lastSessionsKey = sessionsKey;
       const pillBox = el("session-pills");
       pillBox.innerHTML = "";
+
+      if (sessions.length === 0) {
+        const empty = document.createElement("span");
+        empty.className = "setting-desc";
+        empty.textContent = "No active media apps detected right now.";
+        pillBox.appendChild(empty);
+        return;
+      }
+
       sessions.forEach(app => {
         const span = document.createElement("span");
-        span.className = "pill";
+        const isListed = currentTokens.includes(app.toLowerCase());
+        span.className = `pill${isListed ? " active" : ""}`;
         span.textContent = app;
         span.onclick = () => {
           const cur = flistEl.value.split(",").map(s => s.trim()).filter(Boolean);
-          if (!cur.includes(app)) {
+          const idx = cur.findIndex(item => item.toLowerCase() === app.toLowerCase());
+          if (idx >= 0) {
+            cur.splice(idx, 1);
+          } else {
             cur.push(app);
-            flistEl.value = cur.join(", ");
-            saveLive();
           }
+          flistEl.value = cur.join(", ");
+          lastSessionsKey = null;
+          saveLive();
         };
         pillBox.appendChild(span);
       });
@@ -2534,17 +3400,13 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
     setTimeout(pollDashboard, 1000);
   }
 
-  function resizePreview() {
-    preview.width = Math.max(540, Number(wEl.value) + 40);
-    preview.height = Math.max(160, Number(hEl.value) + 40);
-  }
-
   async function saveLive() {
+    updateConditionalRows();
     resizePreview();
     updateGeneratedUrls();
     if (!syncGlobalEl.checked) return;
 
-    const mode = modeEl.value;
+    const mode = getDisplayMode();
     await fetch("/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2566,8 +3428,37 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
     });
   }
 
-  [wEl, hEl, rEl, oEl, themeEl, modeEl, toastEl, fmodeEl, flistEl, cleanEl, tfmtEl, tidleEl]
-    .forEach(input => input.addEventListener("input", saveLive));
+  // Range <-> Number two-way bindings
+  [
+    [wRangeEl, wEl],
+    [hRangeEl, hEl],
+    [rRangeEl, rEl],
+    [oRangeEl, oEl]
+  ].forEach(([rangeInput, numInput]) => {
+    rangeInput.addEventListener("input", () => {
+      syncRangeAndNumber(rangeInput, numInput);
+      saveLive();
+    });
+    numInput.addEventListener("input", () => {
+      syncRangeAndNumber(numInput, rangeInput);
+      saveLive();
+    });
+  });
+
+  // Mutually exclusive visibility toggles (maps to "always", "toast", or "default")
+  showPausedEl.addEventListener("change", () => {
+    if (showPausedEl.checked) autoHideToastEl.checked = false;
+    saveLive();
+  });
+
+  autoHideToastEl.addEventListener("change", () => {
+    if (autoHideToastEl.checked) showPausedEl.checked = false;
+    saveLive();
+  });
+
+  [themeEl, toastEl, fmodeEl, flistEl, cleanEl, tfmtEl, tidleEl].forEach(input => {
+    input.addEventListener("input", saveLive);
+  });
 
   syncGlobalEl.addEventListener("change", () => {
     if (syncGlobalEl.checked) saveLive();
@@ -2581,31 +3472,134 @@ const SETTINGS_HTML: &str = r#"<!DOCTYPE html>
     });
   });
 
-  el("reset").addEventListener("click", () => {
-    wEl.value = 510; hEl.value = 122; rEl.value = 10; oEl.value = 1.0;
-    themeEl.value = "default"; modeEl.value = "default"; toastEl.value = 8;
-    fmodeEl.value = "all"; flistEl.value = "";
+  // Top URL Mode Tabs & Click-to-Copy Box
+  document.querySelectorAll(".url-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".url-tab").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      activeUrlTab = btn.dataset.urlMode;
+      updateGeneratedUrls();
+    });
+  });
+
+  copyUrlBox.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(getActiveUrlString());
+    copyUrlBox.classList.add("copied");
+    copyUrlOverlay.textContent = "Copied to clipboard!";
+    setTimeout(() => {
+      copyUrlBox.classList.remove("copied");
+      copyUrlOverlay.textContent = "Click to copy URL";
+    }, 1400);
+  });
+
+  // Active Sources Drawer Toggle
+  el("toggle-sources-btn").addEventListener("click", () => {
+    const drawer = el("sources-drawer");
+    const isOpen = drawer.classList.toggle("open");
+    el("toggle-sources-btn").textContent = isOpen ? "Hide active sources ▴" : "View active sources ▾";
+  });
+
+  // Chat Bot Token Chips
+  document.querySelectorAll(".token-chip").forEach(chip => {
+    chip.addEventListener("click", () => {
+      const token = chip.dataset.token;
+      const start = tfmtEl.selectionStart ?? tfmtEl.value.length;
+      const end = tfmtEl.selectionEnd ?? tfmtEl.value.length;
+      tfmtEl.value = tfmtEl.value.slice(0, start) + token + tfmtEl.value.slice(end);
+      tfmtEl.focus();
+      saveLive();
+    });
+  });
+
+  // Preview Stage Backdrop Switcher
+  const stageEl = el("stage");
+  document.querySelectorAll(".bg-swatch").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".bg-swatch").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      stageEl.className = `stage ${btn.dataset.bg}`;
+    });
+  });
+
+  // Modal: Load Default Settings
+  const modalDefaults = el("modal-defaults");
+  el("btn-open-defaults").addEventListener("click", () => modalDefaults.classList.add("open"));
+  el("btn-cancel-defaults").addEventListener("click", () => modalDefaults.classList.remove("open"));
+  el("btn-confirm-defaults").addEventListener("click", () => {
+    wEl.value = wRangeEl.value = 510;
+    hEl.value = hRangeEl.value = 122;
+    rEl.value = rRangeEl.value = 10;
+    oEl.value = oRangeEl.value = 1.0;
+    themeEl.value = "default";
+    toastEl.value = 8;
+    applyDisplayModeToToggles("default");
+    fmodeEl.value = "all";
+    flistEl.value = "";
     cleanEl.checked = true;
     tfmtEl.value = "{artist} — {title}";
     tidleEl.value = "No track playing";
+    modalDefaults.classList.remove("open");
     saveLive();
   });
 
-  function bindCopyButton(btnId, getText, defaultLabel) {
-    el(btnId).addEventListener("click", async (e) => {
-      await navigator.clipboard.writeText(getText());
-      e.target.textContent = "Copied!";
-      setTimeout(() => e.target.textContent = defaultLabel, 1500);
-    });
-  }
+  // Modal: Load Settings from URL
+  const modalLoad = el("modal-load");
+  const importUrlInput = el("import-url-input");
+  el("btn-open-load").addEventListener("click", () => {
+    importUrlInput.value = "";
+    modalLoad.classList.add("open");
+    importUrlInput.focus();
+  });
+  el("btn-cancel-load").addEventListener("click", () => modalLoad.classList.remove("open"));
+  el("btn-confirm-load").addEventListener("click", () => {
+    const raw = importUrlInput.value.trim();
+    if (!raw) return;
+    try {
+      const parsed = new URL(raw, BASE_URL);
+      const p = parsed.searchParams;
 
-  bindCopyButton("copy", () => `${BASE_URL}/`, "Copy Global URL");
-  bindCopyButton("copy-override", buildWidgetOverrideUrl, "Copy Override URL");
-  bindCopyButton("copy-text", () => `${BASE_URL}/text`, "Copy Base /text URL");
-  bindCopyButton("copy-text-override", buildTextOverrideUrl, "Copy Custom /text URL");
+      if (p.has("theme")) themeEl.value = p.get("theme");
+      if (p.has("w") || p.has("width")) {
+        wEl.value = wRangeEl.value = p.get("w") || p.get("width");
+      }
+      if (p.has("h") || p.has("height")) {
+        hEl.value = hRangeEl.value = p.get("h") || p.get("height");
+      }
+      if (p.has("radius")) {
+        rEl.value = rRangeEl.value = p.get("radius");
+      }
+      if (p.has("opacity") || p.has("bg_alpha")) {
+        oEl.value = oRangeEl.value = p.get("opacity") || p.get("bg_alpha");
+      }
+      if (p.has("toast")) {
+        toastEl.value = p.get("toast");
+      }
+      if (p.has("mode")) {
+        applyDisplayModeToToggles(p.get("mode"));
+      } else if (p.has("always_show")) {
+        const always = ["1", "true", "yes"].includes((p.get("always_show") || "").toLowerCase());
+        applyDisplayModeToToggles(always ? "always" : "default");
+      }
+      if (p.has("format")) {
+        tfmtEl.value = p.get("format");
+      }
+
+      modalLoad.classList.remove("open");
+      saveLive();
+    } catch (err) {
+      importUrlInput.style.borderColor = "#e11d48";
+    }
+  });
+
+  // Close modals on backdrop click
+  [modalDefaults, modalLoad].forEach(modal => {
+    modal.addEventListener("click", e => {
+      if (e.target === modal) modal.classList.remove("open");
+    });
+  });
 
   loadInitial().then(() => setTimeout(pollDashboard, 1000));
 </script>
 </body>
 </html>
-"#;
+"##;

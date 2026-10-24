@@ -1,6 +1,6 @@
 [package]
 name = "smtc-now-playing"
-version = "2.2.2"
+version = "2.2.3"
 edition = "2021"
 build = "build.rs"
 
