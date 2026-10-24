@@ -15,7 +15,7 @@ A lightweight, native **Rust** Windows utility that reads currently playing trac
 ## ✨ Features
 
 * **Native Rust Performance**: Compiles into a standalone **~2 MB `.exe`** with zero external runtime dependencies, instant startup, and **~4 MB RAM** usage.
-* **Event-Driven Universal Media Support**: Hooks directly into Windows SMTC session, playback, and metadata change events for instant reaction times across Spotify, Apple Music, YouTube/Twitch in Chrome, Edge, or Firefox, VLC, and more.
+* **Event-Driven Universal Media Support**: Hooks directly into Windows SMTC session, playback, and metadata change events for instant reaction times across Spotify, Apple Music, YouTube in Chrome, Edge, or Firefox, and more.
 * **Per-App Session Filtering**: Allow-list or block-list specific applications (e.g., locking the widget to `Spotify.exe` or ignoring `chrome.exe`) directly from the web settings dashboard so browser videos never hijack your music overlay.
 * **Automatic Title & Artist Sanitizer**: Strips noisy video and stream suffixes such as `(Official Music Video)`, `[Lyrics]`, `- YouTube`, and YouTube's `- Topic` channel suffix.
 * **Dual-Tone Vibrant Accent Extraction**: Samples album art in HSV color space—filtering out near-black, pure white, and desaturated grey pixels—to extract primary and secondary accent hues (`--accent` and `--accent2`) for a dual-tone neon progress bar and ambient card glow.
