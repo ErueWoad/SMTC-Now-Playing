@@ -539,13 +539,19 @@ fn extract_vibrant_palette(img: &DynamicImage) -> ([u8; 3], [u8; 3]) {
 
     #[derive(Clone, Copy, Default)]
     struct Bin {
-        weight: f32,
+        area_weight: f32,
+        color_weight: f32,
         r: f32,
         g: f32,
         b: f32,
+        sat_sum: f32,
     }
 
     let mut bins = [Bin::default(); 36];
+    let mut neutral_weight = 0.0f32;
+    let mut neutral_r = 0.0f32;
+    let mut neutral_g = 0.0f32;
+    let mut neutral_b = 0.0f32;
 
     for pixel in small.pixels() {
         let rf = pixel[0] as f32 / 255.0;
@@ -553,62 +559,138 @@ fn extract_vibrant_palette(img: &DynamicImage) -> ([u8; 3], [u8; 3]) {
         let bf = pixel[2] as f32 / 255.0;
         let (h, s, v) = rgb_to_hsv(rf, gf, bf);
 
-        if v < 0.20 || s < 0.25 || (v > 0.95 && s < 0.40) {
+        // Ignore pitch-black shadows
+        if v < 0.15 {
             continue;
         }
 
-        let weight = s.powf(2.2) * v.powf(1.2);
+        // Track low-saturation pixels separately so they don't muddy chromatic bins
+        if s < 0.16 {
+            let nw = v.clamp(0.25, 0.90);
+            neutral_weight += nw;
+            neutral_r += rf * nw;
+            neutral_g += gf * nw;
+            neutral_b += bf * nw;
+            continue;
+        }
+
+        // area_weight decides WHICH hue wins (favors coverage across the art)
+        let area_w = s.powf(0.8) * v.powf(0.9);
+        // color_weight decides the SHADE within that hue (favors clear, non-muddy pixels)
+        let color_w = s.powf(2.0) * v.powf(1.8);
+
         let idx = ((h * 36.0) as usize) % 36;
-        bins[idx].weight += weight;
-        bins[idx].r += rf * weight;
-        bins[idx].g += gf * weight;
-        bins[idx].b += bf * weight;
+        bins[idx].area_weight += area_w;
+        bins[idx].color_weight += color_w;
+        bins[idx].r += rf * color_w;
+        bins[idx].g += gf * color_w;
+        bins[idx].b += bf * color_w;
+        bins[idx].sat_sum += s * area_w;
     }
 
-    let (best_idx, best) = bins
+    let total_chroma_area: f32 = bins.iter().map(|b| b.area_weight).sum();
+
+    // Smooth neighboring area weights so hues sitting on a bin boundary aren't split
+    let mut smoothed_area = [0.0f32; 36];
+    for i in 0..36 {
+        let prev = bins[(i + 35) % 36].area_weight * 0.25;
+        let curr = bins[i].area_weight * 0.50;
+        let next = bins[(i + 1) % 36].area_weight * 0.25;
+        smoothed_area[i] = prev + curr + next;
+    }
+
+    let (best_idx, best_area) = smoothed_area
         .iter()
         .copied()
         .enumerate()
-        .max_by(|a, b| a.1.weight.partial_cmp(&b.1.weight).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap_or((0, Bin::default()));
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or((0, 0.0));
 
-    if best.weight <= 0.0 {
-        return ([235, 235, 245], [160, 170, 255]);
+    // True grayscale / B&W cover fallback
+    if best_area <= 0.0 || total_chroma_area < neutral_weight * 0.06 {
+        if neutral_weight > 0.0 {
+            let nr = (neutral_r / neutral_weight).clamp(0.65, 0.92);
+            let ng = (neutral_g / neutral_weight).clamp(0.65, 0.92);
+            let nb = (neutral_b / neutral_weight).clamp(0.65, 0.92);
+            let primary = [(nr * 255.0) as u8, (ng * 255.0) as u8, (nb * 255.0) as u8];
+            let secondary = [
+                (nr * 0.68 * 255.0) as u8,
+                (ng * 0.68 * 255.0) as u8,
+                (nb * 0.68 * 255.0) as u8,
+            ];
+            return (primary, secondary);
+        }
+        return ([215, 215, 225], [145, 145, 160]);
     }
 
-    let bin_to_rgb = |b: Bin| -> ([u8; 3], f32, f32, f32) {
-        let avg_r = b.r / b.weight;
-        let avg_g = b.g / b.weight;
-        let avg_b = b.b / b.weight;
+    // Extract clean representative color from a 3-bin cluster without neon blowout
+    let sample_cluster = |center: usize| -> ([u8; 3], f32, f32, f32) {
+        let indices = [(center + 35) % 36, center, (center + 1) % 36];
+        let mut cw_sum = 0.0f32;
+        let mut r_sum = 0.0f32;
+        let mut g_sum = 0.0f32;
+        let mut b_sum = 0.0f32;
+
+        for &i in &indices {
+            cw_sum += bins[i].color_weight;
+            r_sum += bins[i].r;
+            g_sum += bins[i].g;
+            b_sum += bins[i].b;
+        }
+
+        let avg_r = r_sum / cw_sum.max(1e-5);
+        let avg_g = g_sum / cw_sum.max(1e-5);
+        let avg_b = b_sum / cw_sum.max(1e-5);
         let (h, s, v) = rgb_to_hsv(avg_r, avg_g, avg_b);
-        let (ro, go, bo) = hsv_to_rgb(h, s.max(0.80), v.max(0.92));
+
+        // Gently lift dull/dark mid-tones so they pop on the dark card without going neon
+        let out_s = (s * 1.15).max(0.42).min(0.86);
+        let out_v = (v * 1.18).max(0.68).min(0.92);
+
+        let (ro, go, bo) = hsv_to_rgb(h, out_s, out_v);
         (
             [(ro * 255.0) as u8, (go * 255.0) as u8, (bo * 255.0) as u8],
             h,
-            s,
-            v,
+            out_s,
+            out_v,
         )
     };
 
-    let (primary_rgb, h1, s1, v1) = bin_to_rgb(best);
+    let (primary_rgb, h1, s1, v1) = sample_cluster(best_idx);
 
-    // Find secondary hue bin at least 4 bins (40 deg) away on the hue wheel
-    let second = bins
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|(idx, b)| {
-            let diff = (*idx as i32 - best_idx as i32).abs();
+    // Find a secondary accent that has real hue contrast (e.g. pink/amber against green)
+    let second = (0..36)
+        .filter_map(|idx| {
+            let diff = (idx as i32 - best_idx as i32).abs();
             let circular_dist = diff.min(36 - diff);
-            circular_dist >= 4 && b.weight >= best.weight * 0.08
-        })
-        .max_by(|a, b| a.1.weight.partial_cmp(&b.1.weight).unwrap_or(std::cmp::Ordering::Equal));
+            let area = smoothed_area[idx];
 
-    let secondary_rgb = if let Some((_, sec_bin)) = second {
-        bin_to_rgb(sec_bin).0
+            // Require at least 40 deg (4 bins) separation and 5% of primary area
+            if circular_dist < 4 || area < best_area * 0.05 || bins[idx].color_weight <= 0.0 {
+                return None;
+            }
+
+            let avg_sat = (bins[idx].sat_sum / bins[idx].area_weight.max(1e-5)).clamp(0.2, 1.0);
+            // Reward hues further away on the color wheel so distinct accents beat adjacent tones
+            let contrast_bonus =
+                0.45 + 0.55 * ((circular_dist as f32 / 18.0) * std::f32::consts::FRAC_PI_2).sin();
+
+            let score = area.powf(0.60) * avg_sat.powf(1.3) * contrast_bonus;
+            Some((idx, score))
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let secondary_rgb = if let Some((sec_idx, _)) = second {
+        sample_cluster(sec_idx).0
     } else {
-        let h2 = (h1 + 0.11).fract();
-        let (r2, g2, b2) = hsv_to_rgb(h2, s1.max(0.78), v1.max(0.92));
+        // Single-hue cover fallback: create a visible warm/cool + brightness gradient step
+        let h2 = (h1 + 0.06).fract();
+        let v2 = if v1 > 0.76 {
+            (v1 - 0.20).max(0.52)
+        } else {
+            (v1 + 0.18).min(0.94)
+        };
+        let (r2, g2, b2) = hsv_to_rgb(h2, (s1 * 0.92).max(0.38), v2);
         [(r2 * 255.0) as u8, (g2 * 255.0) as u8, (b2 * 255.0) as u8]
     };
 
