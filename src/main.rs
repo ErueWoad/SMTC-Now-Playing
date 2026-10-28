@@ -934,49 +934,54 @@ impl HookedSessionList {
 
 fn read_thumbnail(thumb_ref: &IRandomAccessStreamReference) -> Option<DynamicImage> {
     let stream = thumb_ref.OpenReadAsync().ok()?.get().ok()?;
-    let result = (|| -> Option<DynamicImage> {
-        let size = stream.Size().ok()?;
-        if size == 0 || size > MAX_THUMBNAIL_BYTES {
-            return None;
-        }
-        let input_stream = stream.GetInputStreamAt(0).ok()?;
-        let reader = DataReader::CreateDataReader(&input_stream).ok()?;
-        let mut buf = Vec::with_capacity(size as usize);
+    let size = stream.Size().ok()?;
+    if size == 0 || size > MAX_THUMBNAIL_BYTES {
+        return None;
+    }
 
-        while (buf.len() as u64) < size {
-            let to_request = (size - buf.len() as u64).min(64 * 1024) as u32;
-            let loaded = reader.LoadAsync(to_request).ok()?.get().ok()?;
-            if loaded == 0 {
-                break;
-            }
-            let unconsumed = reader.UnconsumedBufferLength().ok()? as usize;
-            if unconsumed == 0 {
-                break;
-            }
-            let prev_len = buf.len();
-            buf.resize(prev_len + unconsumed, 0);
-            if reader.ReadBytes(&mut buf[prev_len..]).is_err() {
-                let _ = reader.Close();
+    let _ = stream.Seek(0);
+    let input_stream = stream.GetInputStreamAt(0).ok()?;
+    let reader = DataReader::CreateDataReader(&input_stream).ok()?;
+    let mut buf = Vec::with_capacity(size as usize);
+
+    while (buf.len() as u64) < size {
+        let to_request = (size - buf.len() as u64).min(64 * 1024) as u32;
+        let loaded = match reader.LoadAsync(to_request).and_then(|op| op.get()) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = reader.DetachStream();
                 return None;
             }
+        };
+        if loaded == 0 {
+            break;
         }
-        let _ = reader.Close();
-        if buf.is_empty() {
+        let unconsumed = reader.UnconsumedBufferLength().unwrap_or(0) as usize;
+        if unconsumed == 0 {
+            break;
+        }
+        let prev_len = buf.len();
+        buf.resize(prev_len + unconsumed, 0);
+        if reader.ReadBytes(&mut buf[prev_len..]).is_err() {
+            let _ = reader.DetachStream();
             return None;
         }
+    }
+    let _ = reader.DetachStream();
 
-        let mut img_reader = ImageReader::new(Cursor::new(&buf))
-            .with_guessed_format()
-            .ok()?;
-        let mut limits = Limits::default();
-        limits.max_image_width = Some(4096);
-        limits.max_image_height = Some(4096);
-        limits.max_alloc = Some(64 * 1024 * 1024); // Cap decoded pixel allocation at 64 MB
-        img_reader.limits(limits);
-        img_reader.decode().ok()
-    })();
-    let _ = stream.Close();
-    result
+    if buf.is_empty() {
+        return None;
+    }
+
+    let mut img_reader = ImageReader::new(Cursor::new(&buf))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(64 * 1024 * 1024); // Cap decoded pixel allocation at 64 MB
+    img_reader.limits(limits);
+    img_reader.decode().ok()
 }
 
 fn normalize_app_id(raw: &str) -> String {
@@ -1095,6 +1100,10 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
         let mut hooked_mgr: Option<HookedManager> = None;
         let mut hooked_sessions: Option<HookedSessionList> = None;
         let mut last_raw_track_key = String::new();
+        let mut last_source_app = String::new();
+        let mut last_raw_artist = String::new();
+        let mut last_album = String::new();
+        let mut track_art_loaded = false;
         let mut track_started_at = Instant::now();
         let mut last_art_attempt: Option<Instant> = None;
         let mut cached_art_hash: u64 = 0;
@@ -1199,21 +1208,32 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                 let is_new_track = raw_track_key != last_raw_track_key;
 
                 if is_new_track {
+                    let same_album_context = source_app == last_source_app
+                        && !raw_artist.is_empty()
+                        && raw_artist.eq_ignore_ascii_case(&last_raw_artist)
+                        && (album.eq_ignore_ascii_case(&last_album)
+                            || album.is_empty()
+                            || last_album.is_empty());
+
                     last_raw_track_key = raw_track_key;
+                    last_source_app = source_app.clone();
+                    last_raw_artist = raw_artist.clone();
+                    last_album = album.clone();
                     track_started_at = Instant::now();
                     last_art_attempt = None;
-                    cached_accent = [255, 15, 135];
-                    cached_accent2 = [0, 210, 255];
-                    cached_art_hash = 0;
-                    cached_art_bytes = None;
+                    track_art_loaded = false;
                     local_anchor_pos = 0.0;
                     local_anchor_time = Instant::now();
-                    if let Ok(mut app) = shared.lock() {
-                        app.art_png = None;
+
+                    if !same_album_context {
+                        cached_accent = [255, 15, 135];
+                        cached_accent2 = [0, 210, 255];
+                        cached_art_hash = 0;
+                        cached_art_bytes = None;
                     }
                 }
 
-                let retry_due = cached_art_hash == 0
+                let retry_due = !track_art_loaded
                     && last_art_attempt
                         .map(|t| t.elapsed() >= Duration::from_millis(180))
                         .unwrap_or(true);
@@ -1229,6 +1249,7 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                             if let Some((png_bytes, hash)) = encoded {
                                 cached_art_hash = hash;
                                 cached_art_bytes = Some(png_bytes);
+                                track_art_loaded = true;
                             }
                         }
                     }
@@ -1321,7 +1342,7 @@ fn spawn_smtc_poller(shared: Arc<Mutex<SharedApp>>, running: Arc<AtomicBool>) ->
                 Ok(has_active_track) => {
                     // Actively poll every 250ms for up to 15s while waiting on missing artwork
                     let waiting_for_art = has_active_track
-                        && cached_art_hash == 0
+                        && !track_art_loaded
                         && track_started_at.elapsed() < Duration::from_secs(15);
 
                     if waiting_for_art {
@@ -1497,8 +1518,14 @@ fn spawn_http_server(
                             None,
                         ));
                     } else {
-                        let _ = request
-                            .respond(Response::from_string("No art").with_status_code(404));
+                        let cache_ctrl =
+                            Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap();
+                        let _ = request.respond(
+                            Response::from_string("No art")
+                                .with_header(cache_ctrl)
+                                .with_header(cors_hdr)
+                                .with_status_code(404),
+                        );
                     }
                 }
                 (&Method::Get, "/text") => {
