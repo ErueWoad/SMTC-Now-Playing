@@ -58,7 +58,7 @@ If you use multiple Browser Sources across different OBS scenes, you can overrid
 | `theme` | `default` | Layout preset: `default`, `vinyl`, `glass`, or `compact` | `?theme=vinyl` |
 | `mode` | `default` | Visibility mode: `default`, `always`, or `toast` | `?mode=toast` |
 | `toast` | `8` | Toast display duration in seconds (`3` – `60`) when `mode=toast` | `?mode=toast&toast=10` |
-| `w` (or `width`) | `510` | Widget width in pixels (`260` – `1920`) | `?w=620` |
+| `w` (or `width`) | `450` | Widget width in pixels (`260` – `1920`) | `?w=620` |
 | `h` (or `height` / `length`) | `122` | Widget height in pixels (`80` – `600`; album art scales automatically) | `?h=140` |
 | `radius` | `10` | Corner roundness of the card in pixels (`0` – `60`) | `?radius=16` |
 | `opacity` (or `bg_alpha`) | `1.0` | Opacity of the card background (`0.0` to `1.0`) | `?opacity=0.88` |
