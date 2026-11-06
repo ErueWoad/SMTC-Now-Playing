@@ -84,13 +84,20 @@ Query `http://127.0.0.1:8765/text` from Streamer.bot, Nightbot, or custom script
 
 ### Project Structure
 ```text
-SMTC-Now-Playing/
-├── Cargo.toml        # Crate metadata, dependencies & size-optimized release profile
-├── build.rs          # Embeds icon.ico into the compiled Windows executable
-├── build.bat         # One-click release build script
-├── icon.ico          # Application & executable icon
+smtc-now-playing/
+├── Cargo.toml
+├── build.rs
 └── src/
-    └── main.rs       # Event-driven SMTC poller, HTTP server, tray icon & HTML/CSS/JS
+    ├── main.rs          # Entry point, system tray menu & Win32 message loop
+    ├── config.rs        # Config, MediaState, SharedApp & JSON persistence
+    ├── win32.rs         # Registry Run key & ShellExecuteW FFI helpers
+    ├── metadata.rs      # Title/artist sanitizer & /text template formatter
+    ├── palette.rs       # Artwork downsampling, HSV clustering & tray icon
+    ├── smtc.rs          # WinRT MediaManager hooks & event-driven poller thread
+    ├── server.rs        # tiny_http server & route handlers
+    └── assets/
+        ├── widget.html  # Browser source UI
+        └── settings.html# Settings dashboard UI
 ```
 
 ### Build Standalone `.exe`
