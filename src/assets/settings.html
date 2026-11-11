@@ -760,6 +760,48 @@
 
         <div class="setting-item">
           <div class="setting-info">
+            <label class="setting-label" for="font">Font Family</label>
+            <div class="setting-desc">Typeface used for track title, artist, and timestamps</div>
+          </div>
+          <div class="setting-control">
+            <select id="font">
+              <option value="Segoe UI">Segoe UI (Default)</option>
+              <option value="Inter">Inter</option>
+              <option value="Poppins">Poppins</option>
+              <option value="Montserrat">Montserrat</option>
+              <option value="Roboto">Roboto</option>
+              <option value="Outfit">Outfit</option>
+              <option value="Space Grotesk">Space Grotesk</option>
+              <option value="Oswald">Oswald</option>
+              <option value="JetBrains Mono">JetBrains Mono</option>
+              <option value="Consolas">Consolas</option>
+              <option value="Georgia">Georgia</option>
+              <option value="__custom__">Custom Font...</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-item column hidden" id="custom-font-row">
+          <div class="setting-info">
+            <label class="setting-label" for="font-custom">Custom Font Name</label>
+            <div class="setting-desc">Enter any installed Windows font or Google Font family name</div>
+          </div>
+          <input id="font-custom" class="full-input" type="text" placeholder="e.g. Bahnschrift, Fira Code, Bebas Neue">
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="fs">Font Size</label>
+            <div class="setting-desc">Title size in pixels; artist &amp; time scale proportionally (12 – 48)</div>
+          </div>
+          <div class="setting-control">
+            <input id="fs-range" type="range" min="12" max="48" step="1" value="22">
+            <input id="fs" type="number" min="12" max="48" step="1" value="22">
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
             <label class="setting-label" for="w">Widget Width</label>
             <div class="setting-desc">Horizontal width in pixels (260 – 1920)</div>
           </div>
@@ -1017,8 +1059,13 @@
   const hEl = el("h"), hRangeEl = el("h-range");
   const rEl = el("r"), rRangeEl = el("r-range");
   const oEl = el("o"), oRangeEl = el("o-range");
+  const fsEl = el("fs"), fsRangeEl = el("fs-range");
 
   const themeEl = el("theme");
+  const fontEl = el("font");
+  const customFontRowEl = el("custom-font-row");
+  const fontCustomEl = el("font-custom");
+
   const showPausedEl = el("show-paused");
   const autoHideToastEl = el("auto-hide-toast");
   const toastRowEl = el("toast-duration-row");
@@ -1036,6 +1083,31 @@
   let activeUrlTab = "override"; // "override" | "global" | "text"
   let lastSessionsKey = null;
   let saveTimeout = null;
+
+  function getSelectedFontFamily() {
+    if (fontEl.value === "__custom__") {
+      return fontCustomEl.value.replace(/["';{}<>\\]/g, "").trim() || "Segoe UI";
+    }
+    return fontEl.value;
+  }
+
+  function applyFontToControls(fontName) {
+    const clean = (fontName || "Segoe UI").trim();
+    const hasPreset = Array.from(fontEl.options).some(
+      opt => opt.value !== "__custom__" && opt.value.toLowerCase() === clean.toLowerCase()
+    );
+    if (hasPreset) {
+      const matched = Array.from(fontEl.options).find(
+        opt => opt.value.toLowerCase() === clean.toLowerCase()
+      );
+      fontEl.value = matched.value;
+      fontCustomEl.value = "";
+    } else {
+      fontEl.value = "__custom__";
+      fontCustomEl.value = clean;
+    }
+    updateConditionalRows();
+  }
 
   function getDisplayMode() {
     if (autoHideToastEl.checked) return "toast";
@@ -1059,6 +1131,8 @@
 
   function updateConditionalRows() {
     toastRowEl.classList.toggle("hidden", !autoHideToastEl.checked);
+    customFontRowEl.classList.toggle("hidden", fontEl.value !== "__custom__");
+
     const fmode = fmodeEl.value;
     if (fmode === "allow") {
       el("flist-label").textContent = "Included Apps";
@@ -1080,6 +1154,8 @@
     const mode = getDisplayMode();
     const params = new URLSearchParams();
     params.set("theme", themeEl.value);
+    params.set("font", getSelectedFontFamily());
+    params.set("font_size", fsEl.value);
     params.set("mode", mode);
     if (mode === "toast") {
       params.set("toast", toastEl.value);
@@ -1112,6 +1188,8 @@
       : `/?${new URLSearchParams({
           mode: "always",
           theme: themeEl.value,
+          font: getSelectedFontFamily(),
+          font_size: fsEl.value,
           w: wEl.value,
           h: hEl.value,
           radius: rEl.value,
@@ -1137,8 +1215,10 @@
     hEl.value = hRangeEl.value = c.height ?? 122;
     rEl.value = rRangeEl.value = c.radius ?? 10;
     oEl.value = oRangeEl.value = c.opacity ?? 1.0;
+    fsEl.value = fsRangeEl.value = c.font_size ?? 22;
 
     themeEl.value = c.theme || "default";
+    applyFontToControls(c.font_family || "Segoe UI");
     toastEl.value = c.toast_seconds ?? 8;
 
     const mode = c.display_mode || (c.always_show ? "always" : "default");
@@ -1236,6 +1316,8 @@
           display_mode: mode,
           toast_seconds: Number(toastEl.value),
           theme: themeEl.value,
+          font_family: getSelectedFontFamily(),
+          font_size: Number(fsEl.value),
           clean_titles: cleanEl.checked,
           filter_mode: fmodeEl.value,
           app_list: flistEl.value,
@@ -1251,7 +1333,8 @@
     [wRangeEl, wEl],
     [hRangeEl, hEl],
     [rRangeEl, rEl],
-    [oRangeEl, oEl]
+    [oRangeEl, oEl],
+    [fsRangeEl, fsEl]
   ].forEach(([rangeInput, numInput]) => {
     rangeInput.addEventListener("input", () => {
       syncRangeAndNumber(rangeInput, numInput);
@@ -1274,7 +1357,15 @@
     saveLive();
   });
 
-  [themeEl, toastEl, fmodeEl, flistEl, cleanEl, tfmtEl, tidleEl].forEach(input => {
+  fontEl.addEventListener("change", () => {
+    updateConditionalRows();
+    if (fontEl.value === "__custom__") {
+      fontCustomEl.focus();
+    }
+    saveLive();
+  });
+
+  [themeEl, fontCustomEl, toastEl, fmodeEl, flistEl, cleanEl, tfmtEl, tidleEl].forEach(input => {
     input.addEventListener("input", saveLive);
   });
 
@@ -1349,7 +1440,9 @@
     hEl.value = hRangeEl.value = 122;
     rEl.value = rRangeEl.value = 10;
     oEl.value = oRangeEl.value = 1.0;
+    fsEl.value = fsRangeEl.value = 22;
     themeEl.value = "default";
+    applyFontToControls("Segoe UI");
     toastEl.value = 8;
     applyDisplayModeToToggles("default");
     fmodeEl.value = "all";
@@ -1378,6 +1471,12 @@
       const p = parsed.searchParams;
 
       if (p.has("theme")) themeEl.value = p.get("theme");
+      if (p.has("font") || p.has("font_family")) {
+        applyFontToControls(p.get("font") || p.get("font_family"));
+      }
+      if (p.has("font_size") || p.has("fontsize") || p.has("size")) {
+        fsEl.value = fsRangeEl.value = p.get("font_size") || p.get("fontsize") || p.get("size");
+      }
       if (p.has("w") || p.has("width")) {
         wEl.value = wRangeEl.value = p.get("w") || p.get("width");
       }

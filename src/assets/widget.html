@@ -3,11 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <title>SMTC Now Playing Browser Source</title>
+<link id="gfont-link" rel="stylesheet" href="">
 <style>
   :root {
     --w: 510px;
     --h: 122px;
     --radius: 10px;
+    --font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-size: 22px;
     --accent-r: 255;
     --accent-g: 15;
     --accent-b: 135;
@@ -29,7 +32,7 @@
   body {
     background: transparent;
     overflow: hidden;
-    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+    font-family: var(--font-family);
   }
 
   #widget {
@@ -154,7 +157,7 @@
   #title {
     display: inline-block;
     color: #ffffff;
-    font-size: 22px;
+    font-size: var(--font-size);
     font-weight: 600;
     white-space: nowrap;
     line-height: 1.25;
@@ -164,7 +167,7 @@
   #artist {
     display: inline-block;
     color: rgb(225, 225, 230);
-    font-size: 16px;
+    font-size: calc(var(--font-size) * 0.727);
     font-weight: 500;
     white-space: nowrap;
     margin-top: 2px;
@@ -186,7 +189,7 @@
     display: flex;
     justify-content: space-between;
     color: rgb(220, 220, 225);
-    font-size: 13px;
+    font-size: calc(var(--font-size) * 0.59);
     font-weight: 600;
     margin-top: auto;
     margin-bottom: 5px;
@@ -270,6 +273,25 @@
   const posEl = document.getElementById("pos");
   const durEl = document.getElementById("dur");
   const barFillEl = document.getElementById("bar-fill");
+  const gfontLinkEl = document.getElementById("gfont-link");
+
+  const SYSTEM_FONTS = new Set([
+    "segoe ui",
+    "arial",
+    "consolas",
+    "georgia",
+    "trebuchet ms",
+    "verdana",
+    "impact",
+    "courier new",
+    "times new roman",
+    "tahoma",
+    "comic sans ms",
+    "system-ui",
+    "sans-serif",
+    "serif",
+    "monospace"
+  ]);
 
   function parseNumericParam(value, min, max) {
     if (value === null || value.trim() === "") return null;
@@ -278,11 +300,19 @@
     return Math.min(max, Math.max(min, num));
   }
 
+  function sanitizeFontName(raw) {
+    if (!raw) return null;
+    const cleaned = raw.replace(/["';{}<>\\]/g, "").trim();
+    return cleaned.length > 0 ? cleaned.slice(0, 128) : null;
+  }
+
   const urlW = parseNumericParam(params.get("w") ?? params.get("width"), 260, 1920);
   const urlH = parseNumericParam(params.get("h") ?? params.get("height") ?? params.get("length"), 80, 600);
   const urlRadius = parseNumericParam(params.get("radius"), 0, 60);
   const urlOpacity = parseNumericParam(params.get("opacity") ?? params.get("bg_alpha"), 0.0, 1.0);
   const urlTheme = params.get("theme");
+  const urlFont = sanitizeFontName(params.get("font") ?? params.get("font_family"));
+  const urlFontSize = parseNumericParam(params.get("font_size") ?? params.get("fontsize") ?? params.get("size"), 12, 48);
   const urlMode = params.get("mode");
   const urlToastSec = parseNumericParam(params.get("toast"), 3, 60);
   const urlAlwaysShow = params.has("always_show")
@@ -304,6 +334,8 @@
   let lastRadius = null;
   let lastOpacity = null;
   let lastTheme = null;
+  let lastFont = null;
+  let lastFontSize = null;
   let lastAccentKey = "";
   let lastPosText = "";
   let lastDurText = "";
@@ -312,6 +344,29 @@
   let wasPlaying = false;
   let isWidgetVisible = false;
   let rafId = null;
+
+  function applyFontFamily(fontName) {
+    const clean = sanitizeFontName(fontName) || "Segoe UI";
+    root.style.setProperty(
+      "--font-family",
+      `"${clean}", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif`
+    );
+
+    if (!SYSTEM_FONTS.has(clean.toLowerCase())) {
+      const encoded = encodeURIComponent(clean);
+      const href = `https://fonts.googleapis.com/css2?family=${encoded}:wght@400;500;600;700&display=swap`;
+      if (gfontLinkEl.getAttribute("href") !== href) {
+        gfontLinkEl.setAttribute("href", href);
+      }
+    }
+
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => {
+        updateScrollAnimation("title-mask", titleEl);
+        updateScrollAnimation("artist-mask", artistEl);
+      });
+    }
+  }
 
   function formatTime(sec) {
     sec = Math.max(0, Math.floor(sec));
@@ -397,6 +452,8 @@
       const finalRadius = urlRadius !== null ? urlRadius : (cfg.radius ?? 10);
       const finalOpacity = urlOpacity !== null ? urlOpacity : (cfg.opacity ?? 1.0);
       const finalTheme = urlTheme || cfg.theme || "default";
+      const finalFont = urlFont || cfg.font_family || "Segoe UI";
+      const finalFontSize = urlFontSize !== null ? urlFontSize : (cfg.font_size || 22);
       const finalToastSec = urlToastSec !== null ? urlToastSec : (cfg.toast_seconds || 8);
 
       let finalMode = urlMode || cfg.display_mode || "default";
@@ -406,7 +463,12 @@
         finalMode = "default";
       }
 
-      const sizeChanged = (finalW !== lastW) || (finalH !== lastH);
+      const layoutOrTypographyChanged =
+        (finalW !== lastW) ||
+        (finalH !== lastH) ||
+        (finalFont !== lastFont) ||
+        (finalFontSize !== lastFontSize);
+
       if (finalW !== lastW) {
         root.style.setProperty("--w", `${finalW}px`);
         lastW = finalW;
@@ -427,6 +489,14 @@
         widgetEl.classList.remove("theme-default", "theme-vinyl", "theme-glass", "theme-compact");
         widgetEl.classList.add(`theme-${finalTheme}`);
         lastTheme = finalTheme;
+      }
+      if (finalFont !== lastFont) {
+        applyFontFamily(finalFont);
+        lastFont = finalFont;
+      }
+      if (finalFontSize !== lastFontSize) {
+        root.style.setProperty("--font-size", `${finalFontSize}px`);
+        lastFontSize = finalFontSize;
       }
 
       const nowMono = performance.now();
@@ -472,7 +542,7 @@
         titleEl.textContent = newTitle;
         lastTitle = newTitle;
         updateScrollAnimation("title-mask", titleEl);
-      } else if (sizeChanged) {
+      } else if (layoutOrTypographyChanged) {
         setTimeout(() => updateScrollAnimation("title-mask", titleEl), 220);
       }
 
@@ -480,7 +550,7 @@
         artistEl.textContent = newArtist;
         lastArtist = newArtist;
         updateScrollAnimation("artist-mask", artistEl);
-      } else if (sizeChanged) {
+      } else if (layoutOrTypographyChanged) {
         setTimeout(() => updateScrollAnimation("artist-mask", artistEl), 220);
       }
 

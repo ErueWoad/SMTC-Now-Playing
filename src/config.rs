@@ -37,6 +37,8 @@ pub struct Config {
     pub display_mode: String, // "default" | "always" | "toast"
     pub toast_seconds: u32,
     pub theme: String,        // "default" | "vinyl" | "glass" | "compact"
+    pub font_family: String,  // e.g. "Segoe UI", "Inter", etc.
+    pub font_size: u32,       // Base title font size in px (12..=48)
     pub clean_titles: bool,
     pub filter_mode: String,  // "all" | "allow" | "block"
     pub app_list: String,     // comma-separated app IDs / keywords
@@ -55,6 +57,8 @@ impl Default for Config {
             display_mode: "default".to_string(),
             toast_seconds: 8,
             theme: "default".to_string(),
+            font_family: "Segoe UI".to_string(),
+            font_size: 22,
             clean_titles: true,
             filter_mode: "all".to_string(),
             app_list: String::new(),
@@ -71,6 +75,19 @@ impl Config {
         self.radius = self.radius.clamp(0, 60);
         self.opacity = (self.opacity.clamp(0.0, 1.0) * 100.0).round() / 100.0;
         self.toast_seconds = self.toast_seconds.clamp(3, 60);
+        self.font_size = self.font_size.clamp(12, 48);
+
+        self.font_family = self
+            .font_family
+            .chars()
+            .filter(|&c| !matches!(c, '"' | '\'' | ';' | '{' | '}' | '<' | '>' | '\\'))
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if self.font_family.is_empty() {
+            self.font_family = "Segoe UI".to_string();
+        }
+        truncate_utf8(&mut self.font_family, 128);
 
         match self.display_mode.as_str() {
             "always" | "toast" | "default" => {}
