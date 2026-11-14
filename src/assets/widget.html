@@ -5,6 +5,7 @@
 <title>SMTC Now Playing Browser Source</title>
 <link id="gfont-link" rel="stylesheet" href="">
 <style>
+  /* CSS Custom Properties (Variables) updated dynamically by JavaScript */
   :root {
     --w: 510px;
     --h: 122px;
@@ -59,6 +60,7 @@
     transform: translateY(0px);
   }
 
+  /* Blurred album cover backdrop used in the "glass" theme */
   #glass-bg {
     position: absolute;
     inset: -24px;
@@ -66,7 +68,7 @@
     background-position: center;
     filter: blur(26px) saturate(1.6) brightness(0.45);
     opacity: 0;
-    transition: opacity 0.4s ease, background-image 0.4s ease;
+    transition: opacity 0.4s ease;
     pointer-events: none;
     z-index: 0;
   }
@@ -75,6 +77,7 @@
     opacity: calc(var(--bg-alpha) * 0.92);
   }
 
+  /* Top dual-tone ambient glow derived from album artwork colors */
   #widget::before {
     content: "";
     position: absolute;
@@ -85,8 +88,8 @@
       rgba(var(--accent-r), var(--accent-g), var(--accent-b), 0.22),
       rgba(var(--accent2-r), var(--accent2-g), var(--accent2-b), 0.16)
     );
-    -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 0) 100%);
-    mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 0) 100%);
+    -webkit-mask-image: linear-gradient(to bottom, #000 0%, transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 0%, transparent 100%);
     pointer-events: none;
     transition: background 0.3s ease;
     z-index: 0;
@@ -98,12 +101,26 @@
     aspect-ratio: 1 / 1;
     border-radius: 6px;
     background-color: rgb(38, 38, 45);
-    background-size: cover;
-    background-position: center;
     flex-shrink: 0;
     z-index: 1;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
     transition: border-radius 0.3s ease;
+    overflow: hidden;
+  }
+
+  /* Two stacked layers allow smooth crossfading when album art changes */
+  .art-layer {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background-size: cover;
+    background-position: center;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+  }
+
+  .art-layer.active {
+    opacity: 1;
   }
 
   /* Vinyl Theme */
@@ -116,8 +133,7 @@
     border-radius: 50%;
     border: 3px solid rgba(20, 20, 24, 0.95);
     box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.10), 0 6px 16px rgba(0, 0, 0, 0.45);
-    animation: vinyl-spin 9s linear infinite;
-    animation-play-state: paused;
+    animation: vinyl-spin 9s linear infinite paused;
   }
 
   #widget.theme-vinyl.is-playing #art-box {
@@ -133,7 +149,8 @@
     border-radius: 50%;
     background: #121215;
     border: 2px solid rgba(255, 255, 255, 0.25);
-    box-shadow: inset 0 1px 3px rgba(0,0,0,0.8);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8);
+    z-index: 2;
   }
 
   .right-col {
@@ -154,25 +171,24 @@
     position: relative;
   }
 
-  #title {
+  #title, #artist {
     display: inline-block;
-    color: #ffffff;
-    font-size: var(--font-size);
-    font-weight: 600;
     white-space: nowrap;
     line-height: 1.25;
     will-change: transform;
   }
 
+  #title {
+    color: #fff;
+    font-size: var(--font-size);
+    font-weight: 600;
+  }
+
   #artist {
-    display: inline-block;
     color: rgb(225, 225, 230);
     font-size: calc(var(--font-size) * 0.727);
     font-weight: 500;
-    white-space: nowrap;
     margin-top: 2px;
-    line-height: 1.25;
-    will-change: transform;
   }
 
   .scrolling {
@@ -205,6 +221,7 @@
     overflow: hidden;
   }
 
+  /* Uses GPU-accelerated `scaleX()` instead of `width` to avoid layout thrashing */
   #bar-fill {
     height: 100%;
     width: 100%;
@@ -243,7 +260,10 @@
 <body>
   <div id="widget">
     <div id="glass-bg"></div>
-    <div id="art-box"></div>
+    <div id="art-box">
+      <div class="art-layer active" id="art-layer-0"></div>
+      <div class="art-layer" id="art-layer-1"></div>
+    </div>
     <div class="right-col">
       <div class="scroll-mask" id="title-mask">
         <div id="title">Waiting for Media...</div>
@@ -264,40 +284,29 @@
 <script>
   const params = new URLSearchParams(window.location.search);
   const root = document.documentElement;
+  const el = id => document.getElementById(id);
 
-  const widgetEl = document.getElementById("widget");
-  const glassBgEl = document.getElementById("glass-bg");
-  const artBoxEl = document.getElementById("art-box");
-  const titleEl = document.getElementById("title");
-  const artistEl = document.getElementById("artist");
-  const posEl = document.getElementById("pos");
-  const durEl = document.getElementById("dur");
-  const barFillEl = document.getElementById("bar-fill");
-  const gfontLinkEl = document.getElementById("gfont-link");
+  const widgetEl = el("widget");
+  const glassBgEl = el("glass-bg");
+  const artLayers = [el("art-layer-0"), el("art-layer-1")];
+  const titleEl = el("title");
+  const artistEl = el("artist");
+  const posEl = el("pos");
+  const durEl = el("dur");
+  const barFillEl = el("bar-fill");
+  const gfontLinkEl = el("gfont-link");
 
+  // Built-in Windows fonts that don't need to be fetched from Google Fonts.
   const SYSTEM_FONTS = new Set([
-    "segoe ui",
-    "arial",
-    "consolas",
-    "georgia",
-    "trebuchet ms",
-    "verdana",
-    "impact",
-    "courier new",
-    "times new roman",
-    "tahoma",
-    "comic sans ms",
-    "system-ui",
-    "sans-serif",
-    "serif",
-    "monospace"
+    "segoe ui", "arial", "consolas", "georgia", "trebuchet ms", "verdana",
+    "impact", "courier new", "times new roman", "tahoma", "comic sans ms",
+    "system-ui", "sans-serif", "serif", "monospace"
   ]);
 
   function parseNumericParam(value, min, max) {
     if (value === null || value.trim() === "") return null;
     const num = Number.parseFloat(value);
-    if (!Number.isFinite(num)) return null;
-    return Math.min(max, Math.max(min, num));
+    return Number.isFinite(num) ? Math.min(max, Math.max(min, num)) : null;
   }
 
   function sanitizeFontName(raw) {
@@ -306,6 +315,7 @@
     return cleaned.length > 0 ? cleaned.slice(0, 128) : null;
   }
 
+  // Parse optional URL query overrides (e.g. `/?theme=vinyl&w=600`).
   const urlW = parseNumericParam(params.get("w") ?? params.get("width"), 260, 1920);
   const urlH = parseNumericParam(params.get("h") ?? params.get("height") ?? params.get("length"), 80, 600);
   const urlRadius = parseNumericParam(params.get("radius"), 0, 60);
@@ -319,74 +329,55 @@
     ? ["1", "true", "yes"].includes((params.get("always_show") || "").toLowerCase())
     : null;
 
-  let state = {
-    is_playing: false,
-    position: 0,
-    duration: 0,
-    syncMono: performance.now()
-  };
+  let state = { is_playing: false, position: 0, duration: 0, syncMono: performance.now() };
+  let currentMode = "default";
+  let activeArtIdx = 0;
+  let lastTitle = null, lastArtist = null, lastArtHash = -1;
+  let lastW = null, lastH = null, lastRadius = null, lastOpacity = null;
+  let lastTheme = null, lastFont = null, lastFontSize = null;
+  let lastAccentKey = "", lastPosText = "", lastDurText = "", lastScaleStr = "";
+  let toastUntilMono = 0, toastTimerId = null, layoutTimerId = null;
+  let wasPlaying = false, isWidgetVisible = false, rafId = null, hasConnectedOnce = false;
 
-  let lastTitle = null;
-  let lastArtist = null;
-  let lastArtHash = -1;
-  let lastW = null;
-  let lastH = null;
-  let lastRadius = null;
-  let lastOpacity = null;
-  let lastTheme = null;
-  let lastFont = null;
-  let lastFontSize = null;
-  let lastAccentKey = "";
-  let lastPosText = "";
-  let lastDurText = "";
-  let lastScaleStr = "";
-  let toastUntilMono = 0;
-  let wasPlaying = false;
-  let isWidgetVisible = false;
-  let rafId = null;
+  function refreshBothMarquees() {
+    updateScrollAnimation("title-mask", titleEl);
+    updateScrollAnimation("artist-mask", artistEl);
+  }
 
   function applyFontFamily(fontName) {
     const clean = sanitizeFontName(fontName) || "Segoe UI";
-    root.style.setProperty(
-      "--font-family",
-      `"${clean}", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif`
-    );
+    root.style.setProperty("--font-family", `"${clean}", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif`);
 
     if (!SYSTEM_FONTS.has(clean.toLowerCase())) {
-      const encoded = encodeURIComponent(clean);
-      const href = `https://fonts.googleapis.com/css2?family=${encoded}:wght@400;500;600;700&display=swap`;
+      const href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(clean)}:wght@400;500;600;700&display=swap`;
       if (gfontLinkEl.getAttribute("href") !== href) {
         gfontLinkEl.setAttribute("href", href);
       }
     }
 
     if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(() => {
-        updateScrollAnimation("title-mask", titleEl);
-        updateScrollAnimation("artist-mask", artistEl);
-      });
+      document.fonts.ready.then(refreshBothMarquees);
     }
   }
 
   function formatTime(sec) {
     sec = Math.max(0, Math.floor(sec));
     const hrs = Math.floor(sec / 3600);
-    const mins = Math.floor((sec % 3600) / 60);
-    const secs = sec % 60;
-    if (hrs > 0) {
-      return `${hrs}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-    }
-    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    const mins = String(Math.floor((sec % 3600) / 60)).padStart(2, "0");
+    const secs = String(sec % 60).padStart(2, "0");
+    return hrs > 0 ? `${hrs}:${mins}:${secs}` : `${mins}:${secs}`;
   }
 
+  /// Measures if text is wider than its container and sets up a back-and-forth marquee scroll.
   function updateScrollAnimation(maskId, textEl) {
-    const maskEl = document.getElementById(maskId);
+    const maskEl = el(maskId);
     if (!maskEl || !textEl) return;
 
     textEl.classList.remove("scrolling");
     textEl.style.removeProperty("--scroll-dist");
     textEl.style.removeProperty("--scroll-duration");
 
+    // Force browser reflow so the animation restarts cleanly from 0px.
     void textEl.offsetWidth;
 
     const overflowPx = textEl.scrollWidth - maskEl.clientWidth;
@@ -398,11 +389,40 @@
     }
   }
 
+  /// Preloads the new album cover in the background and crossfades once ready.
+  function crossfadeArtwork(artHash) {
+    const nextIdx = 1 - activeArtIdx;
+    const nextLayer = artLayers[nextIdx];
+    const curLayer = artLayers[activeArtIdx];
+
+    if (artHash <= 0) {
+      nextLayer.style.backgroundImage = "none";
+      nextLayer.classList.add("active");
+      curLayer.classList.remove("active");
+      glassBgEl.style.backgroundImage = "none";
+      activeArtIdx = nextIdx;
+      return;
+    }
+
+    const url = `/art?v=${artHash}`;
+    const img = new Image();
+    img.onload = () => {
+      if (lastArtHash !== artHash) return;
+      const bgVal = `url('${url}')`;
+      nextLayer.style.backgroundImage = bgVal;
+      nextLayer.classList.add("active");
+      curLayer.classList.remove("active");
+      glassBgEl.style.backgroundImage = bgVal;
+      activeArtIdx = nextIdx;
+    };
+    img.src = url;
+  }
+
+  /// Smoothly interpolates the progress bar at display refresh rate (60/120/144fps).
   function renderTimelineFrame() {
     let curPos = state.position;
     if (state.is_playing) {
-      const elapsed = (performance.now() - state.syncMono) / 1000.0;
-      curPos += elapsed;
+      curPos += (performance.now() - state.syncMono) / 1000.0;
       if (state.duration > 0) curPos = Math.min(curPos, state.duration);
     }
 
@@ -441,161 +461,162 @@
     }
   }
 
-  async function pollServer() {
-    try {
-      const res = await fetch("/state", { cache: "no-store" });
-      const data = await res.json();
-      const cfg = data.config || {};
-
-      const finalW = urlW !== null ? urlW : (cfg.width || 510);
-      const finalH = urlH !== null ? urlH : (cfg.height || 122);
-      const finalRadius = urlRadius !== null ? urlRadius : (cfg.radius ?? 10);
-      const finalOpacity = urlOpacity !== null ? urlOpacity : (cfg.opacity ?? 1.0);
-      const finalTheme = urlTheme || cfg.theme || "default";
-      const finalFont = urlFont || cfg.font_family || "Segoe UI";
-      const finalFontSize = urlFontSize !== null ? urlFontSize : (cfg.font_size || 22);
-      const finalToastSec = urlToastSec !== null ? urlToastSec : (cfg.toast_seconds || 8);
-
-      let finalMode = urlMode || cfg.display_mode || "default";
-      if (urlAlwaysShow === true || (urlMode === null && urlAlwaysShow === null && cfg.always_show)) {
-        finalMode = "always";
-      } else if (urlAlwaysShow === false && finalMode === "always") {
-        finalMode = "default";
-      }
-
-      const layoutOrTypographyChanged =
-        (finalW !== lastW) ||
-        (finalH !== lastH) ||
-        (finalFont !== lastFont) ||
-        (finalFontSize !== lastFontSize);
-
-      if (finalW !== lastW) {
-        root.style.setProperty("--w", `${finalW}px`);
-        lastW = finalW;
-      }
-      if (finalH !== lastH) {
-        root.style.setProperty("--h", `${finalH}px`);
-        lastH = finalH;
-      }
-      if (finalRadius !== lastRadius) {
-        root.style.setProperty("--radius", `${finalRadius}px`);
-        lastRadius = finalRadius;
-      }
-      if (finalOpacity !== lastOpacity) {
-        root.style.setProperty("--bg-alpha", finalOpacity);
-        lastOpacity = finalOpacity;
-      }
-      if (finalTheme !== lastTheme) {
-        widgetEl.classList.remove("theme-default", "theme-vinyl", "theme-glass", "theme-compact");
-        widgetEl.classList.add(`theme-${finalTheme}`);
-        lastTheme = finalTheme;
-      }
-      if (finalFont !== lastFont) {
-        applyFontFamily(finalFont);
-        lastFont = finalFont;
-      }
-      if (finalFontSize !== lastFontSize) {
-        root.style.setProperty("--font-size", `${finalFontSize}px`);
-        lastFontSize = finalFontSize;
-      }
-
-      const nowMono = performance.now();
-      const incomingPlaying = Boolean(data.is_playing);
-      const incomingPos = data.position || 0;
-      const incomingDur = data.duration || 0;
-
-      const newTitle = data.title || "Waiting for Media...";
-      const newArtist = data.artist || "";
-      const trackChanged = (newTitle !== lastTitle) || (newArtist !== lastArtist);
-
-      const curInterp = state.is_playing
-        ? state.position + (nowMono - state.syncMono) / 1000.0
-        : state.position;
-      const drift = incomingPos - curInterp;
-
-      if (
-        trackChanged ||
-        incomingPlaying !== state.is_playing ||
-        Math.abs(drift) > 1.5 ||
-        (incomingPos < 1.0 && curInterp > 2.0)
-      ) {
-        state.position = incomingPos;
-        state.syncMono = nowMono;
-      } else if (incomingPlaying) {
-        state.position = Math.max(curInterp, curInterp + drift * 0.15);
-        state.syncMono = nowMono;
-      } else {
-        state.position = incomingPos;
-        state.syncMono = nowMono;
-      }
-
-      state.is_playing = incomingPlaying;
-      state.duration = incomingDur;
-      widgetEl.classList.toggle("is-playing", state.is_playing);
-
-      if (trackChanged || (state.is_playing && !wasPlaying)) {
-        toastUntilMono = nowMono + (finalToastSec * 1000);
-      }
-      wasPlaying = state.is_playing;
-
-      if (newTitle !== lastTitle) {
-        titleEl.textContent = newTitle;
-        lastTitle = newTitle;
-        updateScrollAnimation("title-mask", titleEl);
-      } else if (layoutOrTypographyChanged) {
-        setTimeout(() => updateScrollAnimation("title-mask", titleEl), 220);
-      }
-
-      if (newArtist !== lastArtist) {
-        artistEl.textContent = newArtist;
-        lastArtist = newArtist;
-        updateScrollAnimation("artist-mask", artistEl);
-      } else if (layoutOrTypographyChanged) {
-        setTimeout(() => updateScrollAnimation("artist-mask", artistEl), 220);
-      }
-
-      const artHash = data.art_hash || 0;
-      if (artHash !== lastArtHash) {
-        const bgVal = artHash > 0 ? `url('/art?v=${artHash}')` : "none";
-        artBoxEl.style.backgroundImage = bgVal;
-        glassBgEl.style.backgroundImage = bgVal;
-        lastArtHash = artHash;
-      }
-
-      if (data.accent && data.accent.length === 3 && data.accent2 && data.accent2.length === 3) {
-        const accentKey = `${data.accent.join(",")}|${data.accent2.join(",")}`;
-        if (accentKey !== lastAccentKey) {
-          root.style.setProperty("--accent-r", data.accent[0]);
-          root.style.setProperty("--accent-g", data.accent[1]);
-          root.style.setProperty("--accent-b", data.accent[2]);
-          root.style.setProperty("--accent2-r", data.accent2[0]);
-          root.style.setProperty("--accent2-g", data.accent2[1]);
-          root.style.setProperty("--accent2-b", data.accent2[2]);
-          lastAccentKey = accentKey;
-        }
-      }
-
-      let shouldShow = false;
-      if (finalMode === "always") {
-        shouldShow = true;
-      } else if (finalMode === "toast") {
-        shouldShow = state.is_playing && (nowMono < toastUntilMono);
-      } else {
-        shouldShow = state.is_playing;
-      }
-
-      isWidgetVisible = shouldShow;
-      widgetEl.classList.toggle("visible", shouldShow);
-      ensureAnimationLoop();
-    } catch (e) {
-      isWidgetVisible = false;
-      widgetEl.classList.remove("visible");
-    } finally {
-      setTimeout(pollServer, 250);
+  function evaluateVisibility() {
+    let shouldShow = false;
+    if (currentMode === "always") {
+      shouldShow = true;
+    } else if (currentMode === "toast") {
+      shouldShow = state.is_playing && (performance.now() < toastUntilMono);
+    } else {
+      shouldShow = state.is_playing;
     }
+
+    isWidgetVisible = shouldShow;
+    widgetEl.classList.toggle("visible", shouldShow);
+    ensureAnimationLoop();
   }
 
-  pollServer();
+  function applyServerState(data) {
+    const cfg = data.config || {};
+
+    const finalW = urlW ?? (cfg.width || 510);
+    const finalH = urlH ?? (cfg.height || 122);
+    const finalRadius = urlRadius ?? (cfg.radius ?? 10);
+    const finalOpacity = urlOpacity ?? (cfg.opacity ?? 1.0);
+    const finalTheme = urlTheme || cfg.theme || "default";
+    const finalFont = urlFont || cfg.font_family || "Segoe UI";
+    const finalFontSize = urlFontSize ?? (cfg.font_size || 22);
+    const finalToastSec = urlToastSec ?? (cfg.toast_seconds || 8);
+
+    let finalMode = urlMode || cfg.display_mode || "default";
+    if (urlAlwaysShow === true || (urlMode === null && urlAlwaysShow === null && cfg.always_show)) {
+      finalMode = "always";
+    } else if (urlAlwaysShow === false && finalMode === "always") {
+      finalMode = "default";
+    }
+    currentMode = finalMode;
+
+    const layoutOrTypographyChanged =
+      finalW !== lastW || finalH !== lastH || finalFont !== lastFont || finalFontSize !== lastFontSize;
+
+    if (finalW !== lastW) { root.style.setProperty("--w", `${finalW}px`); lastW = finalW; }
+    if (finalH !== lastH) { root.style.setProperty("--h", `${finalH}px`); lastH = finalH; }
+    if (finalRadius !== lastRadius) { root.style.setProperty("--radius", `${finalRadius}px`); lastRadius = finalRadius; }
+    if (finalOpacity !== lastOpacity) { root.style.setProperty("--bg-alpha", finalOpacity); lastOpacity = finalOpacity; }
+    if (finalTheme !== lastTheme) {
+      widgetEl.classList.remove("theme-default", "theme-vinyl", "theme-glass", "theme-compact");
+      widgetEl.classList.add(`theme-${finalTheme}`);
+      lastTheme = finalTheme;
+    }
+    if (finalFont !== lastFont) { applyFontFamily(finalFont); lastFont = finalFont; }
+    if (finalFontSize !== lastFontSize) { root.style.setProperty("--font-size", `${finalFontSize}px`); lastFontSize = finalFontSize; }
+
+    const nowMono = performance.now();
+    const incomingPlaying = Boolean(data.is_playing);
+    const incomingPos = data.position || 0;
+    const incomingDur = data.duration || 0;
+
+    const newTitle = data.title || "Waiting for Media...";
+    const newArtist = data.artist || "";
+    const isInitialLoad = lastTitle === null;
+    const trackChanged = !isInitialLoad && (newTitle !== lastTitle || newArtist !== lastArtist);
+
+    const curInterp = state.is_playing
+      ? state.position + (nowMono - state.syncMono) / 1000.0
+      : state.position;
+    const drift = incomingPos - curInterp;
+
+    if (
+      isInitialLoad || trackChanged || incomingPlaying !== state.is_playing ||
+      Math.abs(drift) > 1.5 || (incomingPos < 1.0 && curInterp > 2.0)
+    ) {
+      state.position = incomingPos;
+    } else if (incomingPlaying) {
+      state.position = Math.max(curInterp, curInterp + drift * 0.15);
+    } else {
+      state.position = incomingPos;
+    }
+    state.syncMono = nowMono;
+    state.is_playing = incomingPlaying;
+    state.duration = incomingDur;
+    widgetEl.classList.toggle("is-playing", state.is_playing);
+
+    if (isInitialLoad || trackChanged || (state.is_playing && !wasPlaying)) {
+      const durationMs = finalToastSec * 1000;
+      toastUntilMono = nowMono + durationMs;
+      clearTimeout(toastTimerId);
+      toastTimerId = setTimeout(evaluateVisibility, durationMs + 30);
+    }
+    wasPlaying = state.is_playing;
+
+    if (newTitle !== lastTitle) {
+      titleEl.textContent = newTitle;
+      lastTitle = newTitle;
+      updateScrollAnimation("title-mask", titleEl);
+    }
+
+    if (newArtist !== lastArtist) {
+      artistEl.textContent = newArtist;
+      lastArtist = newArtist;
+      updateScrollAnimation("artist-mask", artistEl);
+    }
+
+    // Re-measure text overflow after the 200ms CSS width/height transition completes.
+    if (layoutOrTypographyChanged) {
+      clearTimeout(layoutTimerId);
+      layoutTimerId = setTimeout(refreshBothMarquees, 220);
+    }
+
+    const artHash = data.art_hash || 0;
+    if (artHash !== lastArtHash) {
+      lastArtHash = artHash;
+      crossfadeArtwork(artHash);
+    }
+
+    if (data.accent?.length === 3 && data.accent2?.length === 3) {
+      const accentKey = `${data.accent.join(",")}|${data.accent2.join(",")}`;
+      if (accentKey !== lastAccentKey) {
+        root.style.setProperty("--accent-r", data.accent[0]);
+        root.style.setProperty("--accent-g", data.accent[1]);
+        root.style.setProperty("--accent-b", data.accent[2]);
+        root.style.setProperty("--accent2-r", data.accent2[0]);
+        root.style.setProperty("--accent2-g", data.accent2[1]);
+        root.style.setProperty("--accent2-b", data.accent2[2]);
+        lastAccentKey = accentKey;
+      }
+    }
+
+    evaluateVisibility();
+  }
+
+  async function waitForServerAndReload() {
+    try {
+      const res = await fetch("/state", { cache: "no-store" });
+      if (res.ok) {
+        window.location.reload();
+        return;
+      }
+    } catch (_) {}
+    setTimeout(waitForServerAndReload, 1000);
+  }
+
+  function connectWebSocket() {
+    const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${wsProto}//${window.location.host}/ws`);
+
+    ws.onopen = () => { hasConnectedOnce = true; };
+    ws.onmessage = event => {
+      try { applyServerState(JSON.parse(event.data)); } catch (_) {}
+    };
+    ws.onclose = () => {
+      isWidgetVisible = false;
+      widgetEl.classList.remove("visible");
+      setTimeout(hasConnectedOnce ? waitForServerAndReload : connectWebSocket, 1000);
+    };
+    ws.onerror = () => ws.close();
+  }
+
+  connectWebSocket();
 </script>
 </body>
 </html>

@@ -1,277 +1,306 @@
-use std::io::{Cursor, Read};
+use std::collections::HashMap;
+use std::net::TcpListener;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle, Thread};
 
+use axum::{
+    body::Bytes,
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Query, State,
+    },
+    http::{header, HeaderMap, StatusCode},
+    response::{Html, IntoResponse, Response},
+    routing::{get, post},
+    Router,
+};
 use serde::Deserialize;
-use tiny_http::{Header, Method, Response, Server, StatusCode};
+use tokio::sync::{broadcast, watch};
 
 use crate::config::{lock_shared, Config, SharedApp, StatePayload};
 use crate::metadata::format_status_text;
 use crate::win32::set_startup_enabled;
 
+// Embeds the HTML files directly inside the compiled .exe binary at compile time.
 const WIDGET_HTML: &str = include_str!("assets/widget.html");
 const SETTINGS_HTML: &str = include_str!("assets/settings.html");
 
-fn url_decode_param(raw: &str) -> String {
-    let mut bytes = Vec::with_capacity(raw.len());
-    let src = raw.as_bytes();
-    let mut i = 0;
-    while i < src.len() {
-        if src[i] == b'+' {
-            bytes.push(b' ');
-            i += 1;
-        } else if src[i] == b'%' && i + 2 < src.len() {
-            if let Ok(hex) = std::str::from_utf8(&src[i + 1..i + 3]) {
-                if let Ok(val) = u8::from_str_radix(hex, 16) {
-                    bytes.push(val);
-                    i += 3;
-                    continue;
-                }
-            }
-            bytes.push(src[i]);
-            i += 1;
-        } else {
-            bytes.push(src[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&bytes).into_owned()
+/// Shared resources passed to Axum route handlers.
+#[derive(Clone)]
+struct AppState {
+    shared: Arc<Mutex<SharedApp>>,
+    ui_dirty: Arc<AtomicBool>,
+    poller_thread: Thread,
+    ws_tx: broadcast::Sender<String>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
-fn parse_query_param(query: &str, key: &str) -> Option<String> {
-    for pair in query.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                return Some(url_decode_param(v));
-            }
-        }
-    }
-    None
+/// Updates the live track position and serializes the state to JSON directly inside
+/// the lock, avoiding cloning any `MediaState` or `Config` strings.
+pub fn build_state_json(shared: &Mutex<SharedApp>) -> String {
+    let mut app = lock_shared(shared);
+    app.sync_live_position();
+    serde_json::to_string(&StatePayload {
+        state: &app.state,
+        config: &app.config,
+        run_on_startup: app.run_on_startup,
+    })
+    .unwrap_or_default()
 }
 
-fn is_valid_local_post(request: &tiny_http::Request) -> bool {
-    let has_json_ct = request.headers().iter().any(|h| {
-        h.field.equiv("Content-Type")
-            && h.value
-                .as_str()
-                .to_ascii_lowercase()
-                .starts_with("application/json")
-    });
+/// Pushes the latest JSON state to all connected WebSocket clients (if any).
+pub fn broadcast_state(shared: &Mutex<SharedApp>, ws_tx: &broadcast::Sender<String>) {
+    if ws_tx.receiver_count() > 0 {
+        let _ = ws_tx.send(build_state_json(shared));
+    }
+}
+
+/// Security check: ensures POST requests came from our own local settings page
+/// and not a malicious external website visited in the user's browser (CSRF protection).
+fn is_valid_local_post(headers: &HeaderMap) -> bool {
+    let has_json_ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| {
+            s.get(..16)
+                .is_some_and(|p| p.eq_ignore_ascii_case("application/json"))
+        });
     if !has_json_ct {
         return false;
     }
 
-    for h in request.headers() {
-        if h.field.equiv("Origin") {
-            let origin = h.value.as_str();
-            if origin != "http://127.0.0.1:8765" && origin != "http://localhost:8765" {
-                return false;
-            }
-        } else if h.field.equiv("Host") {
-            let host = h.value.as_str();
-            if host != "127.0.0.1:8765" && host != "localhost:8765" {
-                return false;
-            }
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        if origin != "http://127.0.0.1:8765" && origin != "http://localhost:8765" {
+            return false;
         }
     }
+
+    if let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
+        if host != "127.0.0.1:8765" && host != "localhost:8765" {
+            return false;
+        }
+    }
+
     true
 }
 
-fn read_bounded_body(request: &mut tiny_http::Request, max_bytes: u64) -> Option<String> {
-    let mut body = String::new();
-    request
-        .as_reader()
-        .take(max_bytes + 1)
-        .read_to_string(&mut body)
-        .ok()?;
-    if body.len() as u64 > max_bytes {
-        return None;
-    }
-    Some(body)
+/// Upgrades an HTTP request at `/ws` into a persistent real-time WebSocket connection.
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+    ws.on_upgrade(move |socket| handle_ws_client(socket, state))
 }
 
-pub fn spawn_http_server(
-    shared: Arc<Mutex<SharedApp>>,
-    running: Arc<AtomicBool>,
-    ui_dirty: Arc<AtomicBool>,
-    server: Arc<Server>,
-    poller_thread: Thread,
-) -> JoinHandle<()> {
-    thread::spawn(move || {
-        while running.load(Ordering::Relaxed) {
-            let Ok(mut request) = server.recv() else {
-                break;
-            };
-            if !running.load(Ordering::Relaxed) {
-                break;
+/// Manages a single connected WebSocket client (OBS Browser Source or Settings tab).
+async fn handle_ws_client(mut socket: WebSocket, state: AppState) {
+    let mut rx = state.ws_tx.subscribe();
+    let mut shutdown_rx = state.shutdown_rx.clone();
+
+    // Immediately send the current track state upon connection.
+    let initial_json = build_state_json(&state.shared);
+    if socket
+        .send(Message::Text(initial_json.into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    // `tokio::select!` waits on multiple async events simultaneously and runs
+    // whichever branch completes first.
+    loop {
+        tokio::select! {
+            // Branch 1: A new state broadcast arrived from the SMTC poller or settings UI.
+            res = rx.recv() => {
+                let payload = match res {
+                    Ok(msg) => msg,
+                    Err(broadcast::error::RecvError::Lagged(_)) => build_state_json(&state.shared),
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                if socket.send(Message::Text(payload.into())).await.is_err() {
+                    break;
+                }
             }
-
-            let full_url = request.url().to_string();
-            let (url_path, query_str) = full_url.split_once('?').unwrap_or((&full_url, ""));
-
-            let cors_wildcard =
-                Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap();
-
-            match (request.method(), url_path) {
-                (&Method::Get, "/state") => {
-                    let (live, cfg, run_on_startup) = {
-                        let app = lock_shared(&shared);
-                        (app.live_state(), app.config.clone(), app.run_on_startup)
-                    };
-                    let body = serde_json::to_vec(&StatePayload {
-                        state: &live,
-                        config: &cfg,
-                        run_on_startup,
-                    })
-                    .unwrap_or_default();
-
-                    let content_type =
-                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-                    let cache_ctrl =
-                        Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap();
-                    let _ = request.respond(
-                        Response::from_data(body)
-                            .with_header(content_type)
-                            .with_header(cache_ctrl),
-                    );
+            // Branch 2: The browser sent a message or closed the WebSocket.
+            msg_opt = socket.recv() => {
+                if matches!(msg_opt, Some(Ok(Message::Close(_))) | None | Some(Err(_))) {
+                    break;
                 }
-                (&Method::Get, "/art") => {
-                    let png_opt = lock_shared(&shared).art_png.clone();
-                    if let Some(png_bytes) = png_opt {
-                        let content_type =
-                            Header::from_bytes(&b"Content-Type"[..], &b"image/png"[..]).unwrap();
-                        let cache_ctrl = Header::from_bytes(
-                            &b"Cache-Control"[..],
-                            &b"public, max-age=86400, immutable"[..],
-                        )
-                        .unwrap();
-                        let len = png_bytes.len();
-                        let _ = request.respond(Response::new(
-                            StatusCode(200),
-                            vec![content_type, cache_ctrl, cors_wildcard],
-                            Cursor::new(png_bytes),
-                            Some(len),
-                            None,
-                        ));
-                    } else {
-                        let cache_ctrl =
-                            Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap();
-                        let _ = request.respond(
-                            Response::from_string("No art")
-                                .with_header(cache_ctrl)
-                                .with_header(cors_wildcard)
-                                .with_status_code(404),
-                        );
-                    }
-                }
-                (&Method::Get, "/text") => {
-                    let custom_fmt = parse_query_param(query_str, "format");
-                    let text_out = {
-                        let app = lock_shared(&shared);
-                        let live = app.live_state();
-                        format_status_text(&live, &app.config, custom_fmt.as_deref())
-                    };
-
-                    let content_type = Header::from_bytes(
-                        &b"Content-Type"[..],
-                        &b"text/plain; charset=utf-8"[..],
-                    )
-                    .unwrap();
-                    let cache_ctrl =
-                        Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap();
-                    let _ = request.respond(
-                        Response::from_string(text_out)
-                            .with_header(content_type)
-                            .with_header(cache_ctrl)
-                            .with_header(cors_wildcard),
-                    );
-                }
-                (&Method::Post, "/startup") => {
-                    if !is_valid_local_post(&request) {
-                        let _ = request
-                            .respond(Response::from_string("Forbidden").with_status_code(403));
-                        continue;
-                    }
-                    #[derive(Deserialize)]
-                    struct StartupPayload {
-                        enabled: bool,
-                    }
-                    let Some(body) = read_bounded_body(&mut request, 1024) else {
-                        let _ = request
-                            .respond(Response::from_string("Bad Request").with_status_code(400));
-                        continue;
-                    };
-                    let Ok(payload) = serde_json::from_str::<StartupPayload>(&body) else {
-                        let _ = request
-                            .respond(Response::from_string("Invalid JSON").with_status_code(400));
-                        continue;
-                    };
-                    let actual = set_startup_enabled(payload.enabled);
-                    lock_shared(&shared).run_on_startup = actual;
-                    ui_dirty.store(true, Ordering::Release);
-
-                    let content_type =
-                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-                    let _ = request.respond(
-                        Response::from_string("{\"ok\":true}").with_header(content_type),
-                    );
-                }
-                (&Method::Post, "/config") => {
-                    if !is_valid_local_post(&request) {
-                        let _ = request
-                            .respond(Response::from_string("Forbidden").with_status_code(403));
-                        continue;
-                    }
-                    let Some(body) = read_bounded_body(&mut request, 8192) else {
-                        let _ = request
-                            .respond(Response::from_string("Bad Request").with_status_code(400));
-                        continue;
-                    };
-                    let Ok(new_cfg) = serde_json::from_str::<Config>(&body) else {
-                        let _ = request
-                            .respond(Response::from_string("Invalid JSON").with_status_code(400));
-                        continue;
-                    };
-                    {
-                        let mut app = lock_shared(&shared);
-                        app.config = new_cfg.clamped();
-                        app.mark_config_dirty();
-                    }
-                    ui_dirty.store(true, Ordering::Release);
-                    poller_thread.unpark();
-
-                    let content_type =
-                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-                    let _ = request.respond(
-                        Response::from_string("{\"ok\":true}").with_header(content_type),
-                    );
-                }
-                (&Method::Get, "/settings") => {
-                    let content_type =
-                        Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
-                            .unwrap();
-                    let _ = request.respond(
-                        Response::from_string(SETTINGS_HTML).with_header(content_type),
-                    );
-                }
-                (&Method::Get, "/") | (&Method::Get, "/index.html") => {
-                    let content_type =
-                        Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
-                            .unwrap();
-                    let _ = request
-                        .respond(Response::from_string(WIDGET_HTML).with_header(content_type));
-                }
-                (&Method::Get, "/favicon.ico") => {
-                    let _ = request.respond(Response::empty(204));
-                }
-                _ => {
-                    let _ = request
-                        .respond(Response::from_string("Not Found").with_status_code(404));
-                }
+            }
+            // Branch 3: The application is exiting.
+            _ = shutdown_rx.changed() => {
+                let _ = socket.send(Message::Close(None)).await;
+                break;
             }
         }
+    }
+}
+
+/// `GET /state` — Returns current track metadata and configuration as JSON.
+async fn get_state(State(state): State<AppState>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        build_state_json(&state.shared),
+    )
+        .into_response()
+}
+
+/// `GET /art` — Serves the current album cover PNG with zero-copy `Bytes`.
+async fn get_art(State(state): State<AppState>) -> Response {
+    // Cloning `Bytes` only increments an atomic reference counter, without copying the image!
+    let png_opt = lock_shared(&state.shared).art_png.clone();
+    if let Some(png_bytes) = png_opt {
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "public, max-age=86400, immutable"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            png_bytes,
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            [
+                (header::CACHE_CONTROL, "no-store"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            "No art",
+        )
+            .into_response()
+    }
+}
+
+/// `GET /text` — Returns a formatted plain-text string for chat bots (Nightbot, Streamer.bot, etc.).
+async fn get_text(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let custom_fmt = params.get("format").map(String::as_str);
+    let text_out = {
+        let mut app = lock_shared(&state.shared);
+        app.sync_live_position();
+        format_status_text(&app.state, &app.config, custom_fmt)
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        text_out,
+    )
+        .into_response()
+}
+
+/// `POST /startup` — Enables or disables launching the app at Windows login.
+async fn post_startup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !is_valid_local_post(&headers) {
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    }
+    if body.len() > 1024 {
+        return (StatusCode::BAD_REQUEST, "Bad Request").into_response();
+    }
+    #[derive(Deserialize)]
+    struct StartupPayload {
+        enabled: bool,
+    }
+    let Ok(payload) = serde_json::from_slice::<StartupPayload>(&body) else {
+        return (StatusCode::BAD_REQUEST, "Invalid JSON").into_response();
+    };
+
+    let actual = set_startup_enabled(payload.enabled);
+    lock_shared(&state.shared).run_on_startup = actual;
+    state.ui_dirty.store(true, Ordering::Release);
+    broadcast_state(&state.shared, &state.ws_tx);
+
+    ([(header::CONTENT_TYPE, "application/json")], "{\"ok\":true}").into_response()
+}
+
+/// `POST /config` — Updates widget settings and triggers a debounced save to disk.
+async fn post_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !is_valid_local_post(&headers) {
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    }
+    if body.len() > 8192 {
+        return (StatusCode::BAD_REQUEST, "Bad Request").into_response();
+    }
+    let Ok(new_cfg) = serde_json::from_slice::<Config>(&body) else {
+        return (StatusCode::BAD_REQUEST, "Invalid JSON").into_response();
+    };
+
+    {
+        let mut app = lock_shared(&state.shared);
+        app.config = new_cfg.clamped();
+        app.mark_config_dirty();
+    }
+    state.ui_dirty.store(true, Ordering::Release);
+    state.poller_thread.unpark();
+    broadcast_state(&state.shared, &state.ws_tx);
+
+    ([(header::CONTENT_TYPE, "application/json")], "{\"ok\":true}").into_response()
+}
+
+/// Spawns a lightweight single-threaded Tokio runtime on a dedicated background thread
+/// to serve HTTP and WebSocket traffic.
+pub fn spawn_http_server(
+    std_listener: TcpListener,
+    shared: Arc<Mutex<SharedApp>>,
+    ui_dirty: Arc<AtomicBool>,
+    poller_thread: Thread,
+    ws_tx: broadcast::Sender<String>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build Tokio runtime");
+
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(std_listener)
+                .expect("Failed to bind async TCP listener");
+
+            let app_state = AppState {
+                shared,
+                ui_dirty,
+                poller_thread,
+                ws_tx,
+                shutdown_rx: shutdown_rx.clone(),
+            };
+
+            let app = Router::new()
+                .route("/ws", get(ws_handler))
+                .route("/state", get(get_state))
+                .route("/art", get(get_art))
+                .route("/text", get(get_text))
+                .route("/startup", post(post_startup))
+                .route("/config", post(post_config))
+                .route("/settings", get(|| async { Html(SETTINGS_HTML) }))
+                .route("/", get(|| async { Html(WIDGET_HTML) }))
+                .route("/index.html", get(|| async { Html(WIDGET_HTML) }))
+                .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
+                .with_state(app_state);
+
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.changed().await;
+                })
+                .await;
+        });
     })
 }

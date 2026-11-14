@@ -6,7 +6,9 @@ use std::sync::{
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use axum::body::Bytes;
 use image::{DynamicImage, ImageReader, Limits};
+use tokio::sync::broadcast;
 use windows::{
     Foundation::{EventRegistrationToken, TypedEventHandler},
     Media::Control::{
@@ -19,12 +21,18 @@ use windows::{
 };
 
 use crate::config::{lock_shared, MediaState, SharedApp};
-use crate::metadata::{artists_match, sanitize_metadata};
+use crate::metadata::{artists_match, find_ascii_case_insensitive, sanitize_metadata};
 use crate::palette::process_artwork;
+use crate::server::broadcast_state;
 
 const MAX_THUMBNAIL_BYTES: u64 = 16 * 1024 * 1024;
+// Seconds between Windows FILETIME epoch (Jan 1, 1601) and Unix epoch (Jan 1, 1970).
 const WINDOWS_TO_UNIX_EPOCH_SECS: f64 = 11_644_473_600.0;
+// Brief delay before hiding the widget when media pauses, preventing flicker between songs.
+const PAUSE_HIDE_GRACE: Duration = Duration::from_millis(800);
 
+/// Wraps the Windows MediaManager and automatically unregisters its event listeners
+/// when dropped (RAII pattern) so we never leak Windows COM callbacks.
 struct HookedManager {
     mgr: MediaManager,
     cur_token: Option<EventRegistrationToken>,
@@ -33,18 +41,20 @@ struct HookedManager {
 
 impl HookedManager {
     fn new(mgr: MediaManager, poller_thread: &Thread, props_changed: &Arc<AtomicBool>) -> Self {
-        let t_cur = poller_thread.clone();
-        let p_cur = Arc::clone(props_changed);
+        // Each Windows event uses a distinct EventArgs type under the hood
+        // (`CurrentSessionChangedEventArgs` vs `SessionsChangedEventArgs`).
+        // Creating a separate `TypedEventHandler::new` for each allows Rust
+        // to automatically infer the exact type each Windows API method expects.
+        let (t_cur, p_cur) = (poller_thread.clone(), Arc::clone(props_changed));
         let cur_token = mgr
             .CurrentSessionChanged(&TypedEventHandler::new(move |_, _| {
                 p_cur.store(true, Ordering::Release);
-                t_cur.unpark();
+                t_cur.unpark(); // Wake up the sleeping poller thread immediately
                 Ok(())
             }))
             .ok();
 
-        let t_ses = poller_thread.clone();
-        let p_ses = Arc::clone(props_changed);
+        let (t_ses, p_ses) = (poller_thread.clone(), Arc::clone(props_changed));
         let ses_token = mgr
             .SessionsChanged(&TypedEventHandler::new(move |_, _| {
                 p_ses.store(true, Ordering::Release);
@@ -72,6 +82,7 @@ impl Drop for HookedManager {
     }
 }
 
+/// Wraps an individual app's MediaSession and unregisters its callbacks when dropped.
 struct HookedSession {
     session: MediaSession,
     app_id: String,
@@ -96,6 +107,7 @@ impl HookedSession {
             }))
             .ok();
 
+        // Only subscribe to track metadata & timeline changes on the currently selected app.
         let (prop_token, time_token) = if is_active {
             let t_prop = poller_thread.clone();
             let p_prop = Arc::clone(props_changed);
@@ -144,6 +156,8 @@ impl Drop for HookedSession {
     }
 }
 
+/// Tracks all hooked sessions so we only re-register Windows event handlers when the
+/// list of open media apps or the active session actually changes.
 struct HookedSessionList {
     active_id: Option<String>,
     items: Vec<HookedSession>,
@@ -185,6 +199,7 @@ impl HookedSessionList {
     }
 }
 
+/// Reads the album cover thumbnail stream from Windows into a decoded `DynamicImage`.
 fn read_thumbnail(thumb_ref: &IRandomAccessStreamReference) -> Option<DynamicImage> {
     let stream = thumb_ref.OpenReadAsync().ok()?.get().ok()?;
     let size = stream.Size().ok()?;
@@ -198,13 +213,9 @@ fn read_thumbnail(thumb_ref: &IRandomAccessStreamReference) -> Option<DynamicIma
 
     while (buf.len() as u64) < size {
         let to_request = (size - buf.len() as u64).min(64 * 1024) as u32;
-        let loaded = match reader.LoadAsync(to_request).and_then(|op| op.get()) {
-            Ok(n) => n,
-            Err(_) => {
-                let _ = reader.DetachStream();
-                let _ = stream.Seek(0);
-                return None;
-            }
+        let Ok(loaded) = reader.LoadAsync(to_request).and_then(|op| op.get()) else {
+            let _ = reader.DetachStream();
+            return None;
         };
         if loaded == 0 {
             break;
@@ -217,12 +228,10 @@ fn read_thumbnail(thumb_ref: &IRandomAccessStreamReference) -> Option<DynamicIma
         buf.resize(prev_len + unconsumed, 0);
         if reader.ReadBytes(&mut buf[prev_len..]).is_err() {
             let _ = reader.DetachStream();
-            let _ = stream.Seek(0);
             return None;
         }
     }
     let _ = reader.DetachStream();
-    let _ = stream.Seek(0);
 
     if buf.is_empty() {
         return None;
@@ -231,6 +240,7 @@ fn read_thumbnail(thumb_ref: &IRandomAccessStreamReference) -> Option<DynamicIma
     let mut img_reader = ImageReader::new(Cursor::new(&buf))
         .with_guessed_format()
         .ok()?;
+    // Enforce strict memory and dimension limits to guard against malformed images.
     let mut limits = Limits::default();
     limits.max_image_width = Some(4096);
     limits.max_image_height = Some(4096);
@@ -239,25 +249,25 @@ fn read_thumbnail(thumb_ref: &IRandomAccessStreamReference) -> Option<DynamicIma
     img_reader.decode().ok()
 }
 
+/// Extracts just the executable or app name if Windows returns a full file path.
 fn normalize_app_id(raw: &str) -> String {
     let trimmed = raw.trim();
-    if let Some((_, tail)) = trimmed.rsplit_once(['\\', '/']) {
-        tail.to_string()
-    } else {
-        trimmed.to_string()
-    }
+    trimmed
+        .rsplit_once(['\\', '/'])
+        .map_or(trimmed, |(_, tail)| tail)
+        .to_string()
 }
 
+/// Checks if `app_id` passes the user's allow/block filter without allocating strings.
 fn app_matches_filter(app_id: &str, filter_mode: &str, app_list: &str) -> bool {
     if filter_mode == "all" || app_list.trim().is_empty() {
         return true;
     }
-    let lower_app = app_id.to_lowercase();
     let matched = app_list
         .split(',')
-        .map(|s| s.trim().to_lowercase())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
-        .any(|token| lower_app.contains(&token));
+        .any(|token| find_ascii_case_insensitive(app_id, token).is_some());
 
     match filter_mode {
         "allow" => matched,
@@ -266,6 +276,15 @@ fn app_matches_filter(app_id: &str, filter_mode: &str, app_list: &str) -> bool {
     }
 }
 
+fn is_session_playing(s: &MediaSession) -> bool {
+    s.GetPlaybackInfo()
+        .and_then(|i| i.PlaybackStatus())
+        .map(|st| st == PlaybackStatus::Playing)
+        .unwrap_or(false)
+}
+
+/// Enumerates all active Windows media sessions, applies the user's app filter,
+/// and picks the best session to display (preferring the currently playing app).
 fn select_session(
     mgr: &MediaManager,
     filter_mode: &str,
@@ -279,93 +298,74 @@ fn select_session(
     let mut discovered_apps = Vec::new();
     let mut allowed_sessions: Vec<(MediaSession, String)> = Vec::new();
 
-    if let Ok(list) = mgr.GetSessions() {
-        let count = list.Size().unwrap_or(0);
-        for i in 0..count {
-            if let Ok(s) = list.GetAt(i) {
-                let app_id = s
-                    .SourceAppUserModelId()
-                    .map(|h| normalize_app_id(&h.to_string()))
-                    .unwrap_or_else(|_| "Unknown".to_string());
-                if !discovered_apps.contains(&app_id) {
-                    discovered_apps.push(app_id.clone());
-                }
-                if app_matches_filter(&app_id, filter_mode, app_list) {
-                    allowed_sessions.push((s, app_id));
-                }
-            }
-        }
-    }
-
-    let current_allowed = mgr.GetCurrentSession().ok().and_then(|cur| {
-        let app_id = cur
+    let mut register_session = |s: MediaSession| -> Option<(MediaSession, String)> {
+        let app_id = s
             .SourceAppUserModelId()
             .map(|h| normalize_app_id(&h.to_string()))
-            .unwrap_or_else(|_| "Unknown".to_string());
+            .unwrap_or_else(|_| "Unknown".into());
         if !discovered_apps.contains(&app_id) {
             discovered_apps.push(app_id.clone());
         }
         if app_matches_filter(&app_id, filter_mode, app_list) {
             if !allowed_sessions.iter().any(|(_, id)| id == &app_id) {
-                allowed_sessions.push((cur.clone(), app_id.clone()));
+                allowed_sessions.push((s.clone(), app_id.clone()));
             }
-            Some((cur, app_id))
+            Some((s, app_id))
         } else {
             None
         }
-    });
+    };
 
-    if !last_source_app.is_empty() {
-        for (s, id) in &allowed_sessions {
-            if id == last_source_app {
-                let playing = s
-                    .GetPlaybackInfo()
-                    .and_then(|i| i.PlaybackStatus())
-                    .map(|st| st == PlaybackStatus::Playing)
-                    .unwrap_or(false);
-                if playing {
-                    return (
-                        Some((s.clone(), id.clone())),
-                        allowed_sessions,
-                        discovered_apps,
-                    );
-                }
+    if let Ok(list) = mgr.GetSessions() {
+        let count = list.Size().unwrap_or(0);
+        for i in 0..count {
+            if let Ok(s) = list.GetAt(i) {
+                let _ = register_session(s);
             }
         }
     }
 
-    for (s, id) in &allowed_sessions {
-        let playing = s
-            .GetPlaybackInfo()
-            .and_then(|i| i.PlaybackStatus())
-            .map(|st| st == PlaybackStatus::Playing)
-            .unwrap_or(false);
-        if playing {
-            return (
-                Some((s.clone(), id.clone())),
-                allowed_sessions,
-                discovered_apps,
-            );
-        }
-    }
+    let current_allowed = mgr.GetCurrentSession().ok().and_then(register_session);
 
+    // Priority 1: Keep the previously active app if it is still actively playing.
     if !last_source_app.is_empty() {
-        if let Some(found) = allowed_sessions.iter().find(|(_, id)| id == last_source_app) {
-            return (Some(found.clone()), allowed_sessions, discovered_apps);
+        if let Some(pair) = allowed_sessions
+            .iter()
+            .find(|(s, id)| id == last_source_app && is_session_playing(s))
+        {
+            return (Some(pair.clone()), allowed_sessions, discovered_apps);
         }
     }
 
-    if let Some(cur) = current_allowed {
-        return (Some(cur), allowed_sessions, discovered_apps);
+    // Priority 2: Switch to any allowed app that is currently playing.
+    if let Some(pair) = allowed_sessions.iter().find(|(s, _)| is_session_playing(s)) {
+        return (Some(pair.clone()), allowed_sessions, discovered_apps);
     }
 
-    let first = allowed_sessions.first().cloned();
-    (first, allowed_sessions, discovered_apps)
+    // Priority 3: Stick with the last active app even if paused.
+    if !last_source_app.is_empty() {
+        if let Some(pair) = allowed_sessions.iter().find(|(_, id)| id == last_source_app) {
+            return (Some(pair.clone()), allowed_sessions, discovered_apps);
+        }
+    }
+
+    // Priority 4: Windows' default current session, or the first allowed session.
+    let chosen = current_allowed.or_else(|| allowed_sessions.first().cloned());
+    (chosen, allowed_sessions, discovered_apps)
 }
 
+struct StepOutcome {
+    has_active_track: bool,
+    in_pause_grace: bool,
+}
+
+/// Spawns the event-driven SMTC background thread. Instead of constantly polling in a
+/// tight loop, this thread sleeps (`thread::park()`) and wakes up only when Windows
+/// fires a media event or when artwork/grace timers need checking.
 pub fn spawn_smtc_poller(
     shared: Arc<Mutex<SharedApp>>,
     running: Arc<AtomicBool>,
+    ws_tx: broadcast::Sender<String>,
 ) -> (Thread, JoinHandle<()>) {
     let (thread_tx, thread_rx) = mpsc::channel::<Thread>();
 
@@ -389,12 +389,13 @@ pub fn spawn_smtc_poller(
         let mut track_started_at = Instant::now();
         let mut last_art_attempt: Option<Instant> = None;
         let mut cached_art_hash: u64 = 0;
-        let mut cached_art_bytes: Option<Arc<[u8]>> = None;
+        let mut cached_art_bytes: Option<Bytes> = None;
         let mut cached_accent: [u8; 3] = [255, 15, 135];
         let mut cached_accent2: [u8; 3] = [0, 210, 255];
         let mut local_anchor_time = Instant::now();
         let mut local_anchor_pos: f64 = 0.0;
         let mut was_playing = false;
+        let mut pause_started_at: Option<Instant> = None;
 
         while running.load(Ordering::Relaxed) {
             let did_props_change = props_changed.swap(false, Ordering::AcqRel);
@@ -408,7 +409,7 @@ pub fn spawn_smtc_poller(
                 )
             };
 
-            let step = (|| -> windows::core::Result<bool> {
+            let step = (|| -> windows::core::Result<StepOutcome> {
                 if hooked_mgr.is_none() {
                     let mgr = MediaManager::RequestAsync()?.get()?;
                     hooked_mgr = Some(HookedManager::new(mgr, &my_thread, &props_changed));
@@ -419,11 +420,10 @@ pub fn spawn_smtc_poller(
                     select_session(mgr, &filter_mode, &app_list, &last_source_app);
                 let active_id = session_opt.as_ref().map(|(_, id)| id.as_str());
 
-                let hooks_match = hooked_sessions
+                if !hooked_sessions
                     .as_ref()
-                    .map(|h| h.matches(&allowed_sessions, active_id))
-                    .unwrap_or(false);
-                if !hooks_match {
+                    .is_some_and(|h| h.matches(&allowed_sessions, active_id))
+                {
                     hooked_sessions = Some(HookedSessionList::new(
                         &allowed_sessions,
                         active_id,
@@ -432,28 +432,54 @@ pub fn spawn_smtc_poller(
                     ));
                 }
 
-                let Some((session, source_app)) = session_opt else {
+                // Reusable helper for transitioning to idle when no session or title is active.
+                let mut handle_no_track = |active_sessions: Vec<String>| -> StepOutcome {
+                    if was_playing {
+                        let paused_at = *pause_started_at.get_or_insert_with(Instant::now);
+                        if paused_at.elapsed() < PAUSE_HIDE_GRACE {
+                            return StepOutcome {
+                                has_active_track: true,
+                                in_pause_grace: true,
+                            };
+                        }
+                    }
                     was_playing = false;
-                    let mut app = lock_shared(&shared);
-                    app.state.is_playing = false;
-                    app.state.active_sessions = active_sessions;
-                    app.state_updated_at = Instant::now();
-                    return Ok(false);
+                    pause_started_at = None;
+                    let changed = {
+                        let mut app = lock_shared(&shared);
+                        let ch =
+                            app.state.is_playing || app.state.active_sessions != active_sessions;
+                        app.state.is_playing = false;
+                        app.state.active_sessions = active_sessions;
+                        app.state_updated_at = Instant::now();
+                        ch
+                    };
+                    if changed || did_props_change {
+                        broadcast_state(&shared, &ws_tx);
+                    }
+                    StepOutcome {
+                        has_active_track: false,
+                        in_pause_grace: false,
+                    }
                 };
 
-                let is_playing = session
-                    .GetPlaybackInfo()
-                    .and_then(|info| info.PlaybackStatus())
-                    .map(|status| status == PlaybackStatus::Playing)
-                    .unwrap_or(false);
+                let Some((session, source_app)) = session_opt else {
+                    return Ok(handle_no_track(active_sessions));
+                };
 
+                let raw_is_playing = is_session_playing(&session);
                 let props = session.TryGetMediaPropertiesAsync()?.get()?;
+
                 let raw_title = props
                     .Title()
                     .map(|s| s.to_string())
                     .unwrap_or_default()
                     .trim()
                     .to_string();
+                if raw_title.is_empty() {
+                    return Ok(handle_no_track(active_sessions));
+                }
+
                 let raw_artist = props
                     .Artist()
                     .map(|s| s.to_string())
@@ -466,15 +492,6 @@ pub fn spawn_smtc_poller(
                     .unwrap_or_default()
                     .trim()
                     .to_string();
-
-                if raw_title.is_empty() {
-                    was_playing = false;
-                    let mut app = lock_shared(&shared);
-                    app.state.is_playing = false;
-                    app.state.active_sessions = active_sessions;
-                    app.state_updated_at = Instant::now();
-                    return Ok(false);
-                }
 
                 let (title, artist) = if clean_titles {
                     sanitize_metadata(&raw_title, &raw_artist)
@@ -523,10 +540,30 @@ pub fn spawn_smtc_poller(
                     }
                 }
 
+                // Apply pause grace period so brief gaps between tracks don't hide the widget.
+                let is_playing = if raw_is_playing {
+                    pause_started_at = None;
+                    true
+                } else if was_playing {
+                    if is_new_track {
+                        pause_started_at = Some(Instant::now());
+                    }
+                    let paused_at = *pause_started_at.get_or_insert_with(Instant::now);
+                    if paused_at.elapsed() < PAUSE_HIDE_GRACE {
+                        true
+                    } else {
+                        pause_started_at = None;
+                        false
+                    }
+                } else {
+                    pause_started_at = None;
+                    false
+                };
+
+                // Browsers/players often supply album art a few hundred milliseconds after
+                // the track title changes, so retry every 180ms until loaded.
                 let retry_due = !track_art_loaded
-                    && last_art_attempt
-                        .map(|t| t.elapsed() >= Duration::from_millis(180))
-                        .unwrap_or(true);
+                    && last_art_attempt.is_none_or(|t| t.elapsed() >= Duration::from_millis(180));
 
                 if is_new_track || did_props_change || retry_due {
                     last_art_attempt = Some(Instant::now());
@@ -544,6 +581,7 @@ pub fn spawn_smtc_poller(
                     }
                 }
 
+                // Clear stale artwork if the new track still has no art after 1.5s.
                 if !track_art_loaded
                     && !same_context_preserve_art
                     && cached_art_hash != 0
@@ -558,6 +596,8 @@ pub fn spawn_smtc_poller(
                 let mut position = 0.0;
                 let mut duration = 0.0;
 
+                // Calculate smooth playback position by combining Windows' last reported
+                // timeline position with monotonic local elapsed time.
                 if let Ok(timeline) = session.GetTimelineProperties() {
                     let raw_pos = timeline
                         .Position()
@@ -581,82 +621,113 @@ pub fn spawn_smtc_poller(
                         .unwrap_or(0.0);
 
                     let age = now_secs - last_updated_secs;
-                    let smtc_pos = if (0.0..36000.0).contains(&age) {
-                        raw_pos + if is_playing { age } else { 0.0 }
+                    let smtc_pos = if (0.0..36000.0).contains(&age) && raw_is_playing {
+                        raw_pos + age
                     } else {
                         raw_pos
                     };
 
-                    let predicted_pos = if is_playing && was_playing {
+                    let predicted_pos = if raw_is_playing && was_playing {
                         local_anchor_pos + local_anchor_time.elapsed().as_secs_f64()
                     } else {
                         local_anchor_pos
                     };
 
                     if is_new_track
-                        || (is_playing != was_playing)
+                        || (raw_is_playing != was_playing)
                         || (smtc_pos - predicted_pos).abs() > 1.5
                     {
-                        local_anchor_pos = smtc_pos;
-                        local_anchor_time = Instant::now();
                         position = smtc_pos;
-                    } else if is_playing {
-                        let corrected = predicted_pos + (smtc_pos - predicted_pos) * 0.10;
-                        position = corrected.max(predicted_pos);
-                        local_anchor_pos = position;
-                        local_anchor_time = Instant::now();
+                    } else if raw_is_playing {
+                        position = (predicted_pos + (smtc_pos - predicted_pos) * 0.10)
+                            .max(predicted_pos);
                     } else {
                         position = smtc_pos;
-                        local_anchor_pos = position;
-                        local_anchor_time = Instant::now();
                     }
 
                     if duration > 0.0 {
                         position = position.clamp(0.0, duration);
                     }
+                    local_anchor_pos = position;
+                    local_anchor_time = Instant::now();
                 }
                 was_playing = is_playing;
 
-                let mut app = lock_shared(&shared);
-                app.art_png = cached_art_bytes.clone();
-                app.state_updated_at = Instant::now();
-                app.state = MediaState {
-                    is_playing,
-                    title,
-                    artist,
-                    album,
-                    source_app,
-                    active_sessions,
-                    position,
-                    duration,
-                    art_hash: cached_art_hash,
-                    accent: cached_accent,
-                    accent2: cached_accent2,
+                let should_broadcast = {
+                    let mut app = lock_shared(&shared);
+                    let state_changed = app.state.is_playing != is_playing
+                        || app.state.title != title
+                        || app.state.artist != artist
+                        || app.state.album != album
+                        || app.state.source_app != source_app
+                        || app.state.art_hash != cached_art_hash
+                        || app.state.active_sessions != active_sessions;
+
+                    app.art_png = cached_art_bytes.clone();
+                    app.state_updated_at = Instant::now();
+                    app.state = MediaState {
+                        is_playing,
+                        title,
+                        artist,
+                        album,
+                        source_app,
+                        active_sessions,
+                        position,
+                        duration,
+                        art_hash: cached_art_hash,
+                        accent: cached_accent,
+                        accent2: cached_accent2,
+                    };
+
+                    state_changed || pause_started_at.is_none()
                 };
 
-                Ok(true)
+                if should_broadcast {
+                    broadcast_state(&shared, &ws_tx);
+                }
+
+                Ok(StepOutcome {
+                    has_active_track: true,
+                    in_pause_grace: pause_started_at.is_some(),
+                })
             })();
 
             match step {
-                Ok(has_active_track) => {
-                    let waiting_for_art = has_active_track
+                Ok(outcome) => {
+                    let waiting_for_art = outcome.has_active_track
                         && !track_art_loaded
                         && track_started_at.elapsed() < Duration::from_secs(15);
 
-                    if waiting_for_art {
+                    if outcome.in_pause_grace {
+                        thread::park_timeout(Duration::from_millis(80));
+                    } else if waiting_for_art {
                         thread::park_timeout(Duration::from_millis(250));
                     } else {
+                        // Everything is loaded and synced: sleep until an event wakes us up!
                         thread::park();
                     }
                 }
                 Err(_) => {
                     hooked_sessions = None;
                     hooked_mgr = None;
+                    if was_playing {
+                        let paused_at = *pause_started_at.get_or_insert_with(Instant::now);
+                        if paused_at.elapsed() < PAUSE_HIDE_GRACE {
+                            thread::park_timeout(Duration::from_millis(100));
+                            continue;
+                        }
+                    }
                     was_playing = false;
-                    {
+                    pause_started_at = None;
+                    let was_active = {
                         let mut app = lock_shared(&shared);
+                        let prev = app.state.is_playing;
                         app.state.is_playing = false;
                         app.state_updated_at = Instant::now();
+                        prev
+                    };
+                    if was_active {
+                        broadcast_state(&shared, &ws_tx);
                     }
                     thread::park_timeout(Duration::from_secs(2));
                 }
@@ -670,6 +741,8 @@ pub fn spawn_smtc_poller(
         }
     });
 
-    let poller_thread = thread_rx.recv().expect("Failed to start SMTC poller thread");
+    let poller_thread = thread_rx
+        .recv()
+        .expect("Failed to start SMTC poller thread");
     (poller_thread, handle)
 }
