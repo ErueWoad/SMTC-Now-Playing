@@ -34,7 +34,6 @@
     display: flex;
   }
 
-  /* Left Configurator Sidebar */
   .sidebar {
     width: 460px;
     min-width: 400px;
@@ -259,7 +258,6 @@
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
   }
 
-  /* Toggle Switch */
   .switch { position: relative; display: inline-block; width: 42px; height: 24px; flex-shrink: 0; }
   .switch input { opacity: 0; width: 0; height: 0; }
   .slider {
@@ -316,7 +314,6 @@
     font-family: Consolas, monospace; font-size: 12.5px; color: var(--text-muted);
   }
 
-  /* Right Preview Stage */
   .stage {
     flex: 1; height: 100vh; position: relative;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -363,7 +360,6 @@
     padding: 2px 8px; border-radius: 999px; white-space: nowrap;
   }
 
-  /* Confirmation & URL Import Modals */
   .modal-backdrop {
     position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72);
     backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center;
@@ -705,6 +701,8 @@
 
 <script>
   const BASE_URL = "http://127.0.0.1:8765";
+  const VALID_THEMES = new Set(["default", "vinyl", "glass", "compact"]);
+  const VALID_MODES = new Set(["default", "always", "toast"]);
   const el = id => document.getElementById(id);
 
   const wEl = el("w"), wRangeEl = el("w-range");
@@ -731,7 +729,7 @@
 
   function getSelectedFontFamily() {
     return fontEl.value === "__custom__"
-      ? (fontCustomEl.value.replace(/["';{}<>\\]/g, "").trim() || "Segoe UI")
+      ? (fontCustomEl.value.replace(/[\x00-\x1f\x7f"';{}<>\\]/g, "").trim() || "Segoe UI")
       : fontEl.value;
   }
 
@@ -829,6 +827,7 @@
 
   async function loadInitial() {
     const res = await fetch("/state", { cache: "no-store" });
+    if (!res.ok) return;
     const data = await res.json();
     const c = data.config || {};
 
@@ -838,10 +837,12 @@
     oEl.value = oRangeEl.value = c.opacity ?? 1.0;
     fsEl.value = fsRangeEl.value = c.font_size ?? 22;
 
-    themeEl.value = c.theme || "default";
+    const loadedTheme = (c.theme || "default").toLowerCase();
+    themeEl.value = VALID_THEMES.has(loadedTheme) ? loadedTheme : "default";
     applyFontToControls(c.font_family || "Segoe UI");
     toastEl.value = c.toast_seconds ?? 8;
-    applyDisplayModeToToggles(c.display_mode || (c.always_show ? "always" : "default"));
+    const loadedMode = (c.display_mode || (c.always_show ? "always" : "default")).toLowerCase();
+    applyDisplayModeToToggles(VALID_MODES.has(loadedMode) ? loadedMode : "default");
 
     fmodeEl.value = c.filter_mode || "all";
     flistEl.value = c.app_list || "";
@@ -904,14 +905,15 @@
     }
   }
 
-  function connectDashboardWs() {
-    const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${wsProto}//${window.location.host}/ws`);
-    ws.onmessage = event => {
+  function connectDashboardEvents() {
+    const es = new EventSource("/events");
+    es.onmessage = event => {
       try { refreshStatus(JSON.parse(event.data)); } catch (_) {}
     };
-    ws.onclose = () => setTimeout(connectDashboardWs, 1000);
-    ws.onerror = () => ws.close();
+    es.onerror = () => {
+      es.close();
+      setTimeout(connectDashboardEvents, 1000);
+    };
   }
 
   function saveLive() {
@@ -925,31 +927,32 @@
       if (!syncGlobalEl.checked) return;
 
       const mode = getDisplayMode();
-      await fetch("/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          width: Number(wEl.value),
-          height: Number(hEl.value),
-          radius: Number(rEl.value),
-          opacity: Number(oEl.value),
-          always_show: mode === "always",
-          display_mode: mode,
-          toast_seconds: Number(toastEl.value),
-          theme: themeEl.value,
-          font_family: getSelectedFontFamily(),
-          font_size: Number(fsEl.value),
-          clean_titles: cleanEl.checked,
-          filter_mode: fmodeEl.value,
-          app_list: flistEl.value,
-          text_format: tfmtEl.value,
-          text_idle: tidleEl.value
-        })
-      });
+      try {
+        await fetch("/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            width: Number(wEl.value),
+            height: Number(hEl.value),
+            radius: Number(rEl.value),
+            opacity: Number(oEl.value),
+            always_show: mode === "always",
+            display_mode: mode,
+            toast_seconds: Number(toastEl.value),
+            theme: themeEl.value,
+            font_family: getSelectedFontFamily(),
+            font_size: Number(fsEl.value),
+            clean_titles: cleanEl.checked,
+            filter_mode: fmodeEl.value,
+            app_list: flistEl.value,
+            text_format: tfmtEl.value,
+            text_idle: tidleEl.value
+          })
+        });
+      } catch (_) {}
     }, 120);
   }
 
-  // Two-way binding between range sliders and numeric inputs
   [[wRangeEl, wEl], [hRangeEl, hEl], [rRangeEl, rEl], [oRangeEl, oEl], [fsRangeEl, fsEl]]
     .forEach(([rangeInput, numInput]) => {
       rangeInput.addEventListener("input", () => { numInput.value = rangeInput.value; saveLive(); });
@@ -981,11 +984,13 @@
   });
 
   startupEl.addEventListener("change", async () => {
-    await fetch("/startup", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: startupEl.checked })
-    });
+    try {
+      await fetch("/startup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: startupEl.checked })
+      });
+    } catch (_) {}
   });
 
   document.querySelectorAll(".url-tab").forEach(btn => {
@@ -998,10 +1003,15 @@
   });
 
   copyUrlBox.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(getActiveUrlString());
-    copyUrlBox.classList.add("copied");
-    copyUrlOverlay.textContent = "Copied to clipboard!";
     clearTimeout(copyTimeout);
+    try {
+      await navigator.clipboard.writeText(getActiveUrlString());
+      copyUrlBox.classList.add("copied");
+      copyUrlOverlay.textContent = "Copied to clipboard!";
+    } catch (_) {
+      copyUrlBox.classList.remove("copied");
+      copyUrlOverlay.textContent = "Copy blocked by browser";
+    }
     copyTimeout = setTimeout(() => {
       copyUrlBox.classList.remove("copied");
       copyUrlOverlay.textContent = "Click to copy URL";
@@ -1069,7 +1079,9 @@
     if (!raw) return;
     try {
       const p = new URL(raw, BASE_URL).searchParams;
-      if (p.has("theme")) themeEl.value = p.get("theme");
+      const importedTheme = (p.get("theme") || "").trim().toLowerCase();
+      if (VALID_THEMES.has(importedTheme)) themeEl.value = importedTheme;
+
       if (p.has("font") || p.has("font_family")) applyFontToControls(p.get("font") || p.get("font_family"));
       if (p.has("font_size") || p.has("fontsize") || p.has("size")) {
         fsEl.value = fsRangeEl.value = p.get("font_size") || p.get("fontsize") || p.get("size");
@@ -1079,8 +1091,10 @@
       if (p.has("radius")) rEl.value = rRangeEl.value = p.get("radius");
       if (p.has("opacity") || p.has("bg_alpha")) oEl.value = oRangeEl.value = p.get("opacity") || p.get("bg_alpha");
       if (p.has("toast")) toastEl.value = p.get("toast");
-      if (p.has("mode")) {
-        applyDisplayModeToToggles(p.get("mode"));
+
+      const importedMode = (p.get("mode") || "").trim().toLowerCase();
+      if (VALID_MODES.has(importedMode)) {
+        applyDisplayModeToToggles(importedMode);
       } else if (p.has("always_show")) {
         const always = ["1", "true", "yes"].includes((p.get("always_show") || "").toLowerCase());
         applyDisplayModeToToggles(always ? "always" : "default");
@@ -1100,7 +1114,7 @@
     });
   });
 
-  loadInitial().then(connectDashboardWs);
+  loadInitial().catch(() => {}).finally(connectDashboardEvents);
 </script>
 </body>
 </html>

@@ -5,7 +5,6 @@
 <title>SMTC Now Playing Browser Source</title>
 <link id="gfont-link" rel="stylesheet" href="">
 <style>
-  /* CSS Custom Properties (Variables) updated dynamically by JavaScript */
   :root {
     --w: 510px;
     --h: 122px;
@@ -60,7 +59,6 @@
     transform: translateY(0px);
   }
 
-  /* Blurred album cover backdrop used in the "glass" theme */
   #glass-bg {
     position: absolute;
     inset: -24px;
@@ -77,7 +75,6 @@
     opacity: calc(var(--bg-alpha) * 0.92);
   }
 
-  /* Top dual-tone ambient glow derived from album artwork colors */
   #widget::before {
     content: "";
     position: absolute;
@@ -108,7 +105,6 @@
     overflow: hidden;
   }
 
-  /* Two stacked layers allow smooth crossfading when album art changes */
   .art-layer {
     position: absolute;
     inset: 0;
@@ -123,7 +119,6 @@
     opacity: 1;
   }
 
-  /* Vinyl Theme */
   @keyframes vinyl-spin {
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
@@ -221,7 +216,6 @@
     overflow: hidden;
   }
 
-  /* Uses GPU-accelerated `scaleX()` instead of `width` to avoid layout thrashing */
   #bar-fill {
     height: 100%;
     width: 100%;
@@ -236,7 +230,6 @@
     transition: background 0.25s ease, box-shadow 0.25s ease;
   }
 
-  /* Compact Theme */
   #widget.theme-compact {
     padding: 8px 14px 12px 10px;
     gap: 12px;
@@ -296,12 +289,187 @@
   const barFillEl = el("bar-fill");
   const gfontLinkEl = el("gfont-link");
 
-  // Built-in Windows fonts that don't need to be fetched from Google Fonts.
+  const DEFAULT_ACCENT = [255, 15, 135];
+  const DEFAULT_ACCENT2 = [0, 210, 255];
+
+  const VALID_THEMES = new Set(["default", "vinyl", "glass", "compact"]);
+  const VALID_MODES = new Set(["default", "always", "toast"]);
+
   const SYSTEM_FONTS = new Set([
     "segoe ui", "arial", "consolas", "georgia", "trebuchet ms", "verdana",
     "impact", "courier new", "times new roman", "tahoma", "comic sans ms",
     "system-ui", "sans-serif", "serif", "monospace"
   ]);
+
+  const paletteCanvas = document.createElement("canvas");
+  paletteCanvas.width = 64;
+  paletteCanvas.height = 64;
+  const paletteCtx = paletteCanvas.getContext("2d", { willReadFrequently: true });
+
+  function clamp(v, lo, hi) {
+    return Math.min(hi, Math.max(lo, v));
+  }
+
+  function rgbToHsv(r, g, b) {
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const delta = max - min;
+    let h = 0;
+    if (delta !== 0) {
+      if (max === r) h = (((g - b) / delta) % 6 + 6) % 6 / 6;
+      else if (max === g) h = (((b - r) / delta) + 2) / 6;
+      else h = (((r - g) / delta) + 4) / 6;
+    }
+    return [h, max === 0 ? 0 : delta / max, max];
+  }
+
+  function hsvToRgb(h, s, v) {
+    if (s === 0) return [v, v, v];
+    const h6 = h * 6;
+    const i = Math.floor(h6);
+    const f = h6 - i;
+    const p = v * (1 - s);
+    const q = v * (1 - s * f);
+    const t = v * (1 - s * (1 - f));
+    switch (((i % 6) + 6) % 6) {
+      case 0: return [v, t, p];
+      case 1: return [q, v, p];
+      case 2: return [p, v, t];
+      case 3: return [p, q, v];
+      case 4: return [t, p, v];
+      default: return [v, p, q];
+    }
+  }
+
+  function toU8Rgb(r, g, b) {
+    return [Math.floor(r * 255), Math.floor(g * 255), Math.floor(b * 255)];
+  }
+
+  // Browser-side 36-bin HSV palette extraction matching the original Rust algorithm.
+  function extractVibrantPalette(img) {
+    if (!paletteCtx) return [DEFAULT_ACCENT, DEFAULT_ACCENT2];
+    try {
+      paletteCtx.clearRect(0, 0, 64, 64);
+      paletteCtx.drawImage(img, 0, 0, 64, 64);
+      const data = paletteCtx.getImageData(0, 0, 64, 64).data;
+
+      const bins = Array.from({ length: 36 }, () => ({
+        areaWeight: 0, colorWeight: 0, r: 0, g: 0, b: 0, satSum: 0
+      }));
+      let neutralWeight = 0, neutralR = 0, neutralG = 0, neutralB = 0;
+
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] < 32) continue;
+        const rf = data[i] / 255, gf = data[i + 1] / 255, bf = data[i + 2] / 255;
+        const [h, s, v] = rgbToHsv(rf, gf, bf);
+        if (v < 0.15) continue;
+
+        if (s < 0.16) {
+          const nw = clamp(v, 0.25, 0.90);
+          neutralWeight += nw;
+          neutralR += rf * nw;
+          neutralG += gf * nw;
+          neutralB += bf * nw;
+          continue;
+        }
+
+        const areaW = Math.pow(s, 0.8) * Math.pow(v, 0.9);
+        const colorW = (s * s) * Math.pow(v, 1.8);
+        const bin = bins[Math.floor(h * 36) % 36];
+        bin.areaWeight += areaW;
+        bin.colorWeight += colorW;
+        bin.r += rf * colorW;
+        bin.g += gf * colorW;
+        bin.b += bf * colorW;
+        bin.satSum += s * areaW;
+      }
+
+      let totalChromaArea = 0;
+      const smoothed = new Array(36);
+      let bestIdx = 0, bestArea = 0;
+      for (let i = 0; i < 36; i++) {
+        totalChromaArea += bins[i].areaWeight;
+        const area = bins[(i + 35) % 36].areaWeight * 0.25
+          + bins[i].areaWeight * 0.50
+          + bins[(i + 1) % 36].areaWeight * 0.25;
+        smoothed[i] = area;
+        if (area > bestArea) {
+          bestArea = area;
+          bestIdx = i;
+        }
+      }
+
+      if (bestArea <= 0 || totalChromaArea < neutralWeight * 0.06) {
+        if (neutralWeight > 0) {
+          const nr = clamp(neutralR / neutralWeight, 0.65, 0.92);
+          const ng = clamp(neutralG / neutralWeight, 0.65, 0.92);
+          const nb = clamp(neutralB / neutralWeight, 0.65, 0.92);
+          return [toU8Rgb(nr, ng, nb), toU8Rgb(nr * 0.68, ng * 0.68, nb * 0.68)];
+        }
+        return [[215, 215, 225], [145, 145, 160]];
+      }
+
+      const sampleCluster = center => {
+        let cwSum = 0, rSum = 0, gSum = 0, bSum = 0;
+        for (const i of [(center + 35) % 36, center, (center + 1) % 36]) {
+          cwSum += bins[i].colorWeight;
+          rSum += bins[i].r;
+          gSum += bins[i].g;
+          bSum += bins[i].b;
+        }
+        const denom = Math.max(cwSum, 1e-5);
+        const [h, s, v] = rgbToHsv(rSum / denom, gSum / denom, bSum / denom);
+        const outS = clamp(s * 1.15, 0.42, 0.86);
+        const outV = clamp(v * 1.18, 0.68, 0.92);
+        const [ro, go, bo] = hsvToRgb(h, outS, outV);
+        return [toU8Rgb(ro, go, bo), h, outS, outV];
+      };
+
+      const [primaryRgb, h1, s1, v1] = sampleCluster(bestIdx);
+
+      let bestSecIdx = -1, bestSecScore = -1;
+      for (let idx = 0; idx < 36; idx++) {
+        const diff = Math.abs(idx - bestIdx);
+        const circularDist = Math.min(diff, 36 - diff);
+        const area = smoothed[idx];
+        if (circularDist < 4 || area < bestArea * 0.05 || bins[idx].colorWeight <= 0) continue;
+
+        const avgSat = clamp(bins[idx].satSum / Math.max(bins[idx].areaWeight, 1e-5), 0.2, 1.0);
+        const contrastBonus = 0.45 + 0.55 * Math.sin((circularDist / 18) * (Math.PI / 2));
+        const score = Math.pow(area, 0.60) * Math.pow(avgSat, 1.3) * contrastBonus;
+        if (score > bestSecScore) {
+          bestSecScore = score;
+          bestSecIdx = idx;
+        }
+      }
+
+      let secondaryRgb;
+      if (bestSecIdx >= 0) {
+        secondaryRgb = sampleCluster(bestSecIdx)[0];
+      } else {
+        const h2 = (h1 + 0.06) % 1;
+        const v2 = v1 > 0.76 ? Math.max(v1 - 0.20, 0.52) : Math.min(v1 + 0.18, 0.94);
+        const [r2, g2, b2] = hsvToRgb(h2, Math.max(s1 * 0.92, 0.38), v2);
+        secondaryRgb = toU8Rgb(r2, g2, b2);
+      }
+
+      return [primaryRgb, secondaryRgb];
+    } catch (_) {
+      return [DEFAULT_ACCENT, DEFAULT_ACCENT2];
+    }
+  }
+
+  function applyAccents(a1, a2) {
+    const key = `${a1.join(",")}|${a2.join(",")}`;
+    if (key === lastAccentKey) return;
+    root.style.setProperty("--accent-r", a1[0]);
+    root.style.setProperty("--accent-g", a1[1]);
+    root.style.setProperty("--accent-b", a1[2]);
+    root.style.setProperty("--accent2-r", a2[0]);
+    root.style.setProperty("--accent2-g", a2[1]);
+    root.style.setProperty("--accent2-b", a2[2]);
+    lastAccentKey = key;
+  }
 
   function parseNumericParam(value, min, max) {
     if (value === null || value.trim() === "") return null;
@@ -311,19 +479,24 @@
 
   function sanitizeFontName(raw) {
     if (!raw) return null;
-    const cleaned = raw.replace(/["';{}<>\\]/g, "").trim();
+    const cleaned = raw.replace(/[\x00-\x1f\x7f"';{}<>\\]/g, "").trim();
     return cleaned.length > 0 ? cleaned.slice(0, 128) : null;
   }
 
-  // Parse optional URL query overrides (e.g. `/?theme=vinyl&w=600`).
+  function sanitizeChoice(raw, allowlist) {
+    if (!raw) return null;
+    const lower = raw.trim().toLowerCase();
+    return allowlist.has(lower) ? lower : null;
+  }
+
   const urlW = parseNumericParam(params.get("w") ?? params.get("width"), 260, 1920);
   const urlH = parseNumericParam(params.get("h") ?? params.get("height") ?? params.get("length"), 80, 600);
   const urlRadius = parseNumericParam(params.get("radius"), 0, 60);
   const urlOpacity = parseNumericParam(params.get("opacity") ?? params.get("bg_alpha"), 0.0, 1.0);
-  const urlTheme = params.get("theme");
+  const urlTheme = sanitizeChoice(params.get("theme"), VALID_THEMES);
   const urlFont = sanitizeFontName(params.get("font") ?? params.get("font_family"));
   const urlFontSize = parseNumericParam(params.get("font_size") ?? params.get("fontsize") ?? params.get("size"), 12, 48);
-  const urlMode = params.get("mode");
+  const urlMode = sanitizeChoice(params.get("mode"), VALID_MODES);
   const urlToastSec = parseNumericParam(params.get("toast"), 3, 60);
   const urlAlwaysShow = params.has("always_show")
     ? ["1", "true", "yes"].includes((params.get("always_show") || "").toLowerCase())
@@ -368,7 +541,6 @@
     return hrs > 0 ? `${hrs}:${mins}:${secs}` : `${mins}:${secs}`;
   }
 
-  /// Measures if text is wider than its container and sets up a back-and-forth marquee scroll.
   function updateScrollAnimation(maskId, textEl) {
     const maskEl = el(maskId);
     if (!maskEl || !textEl) return;
@@ -377,7 +549,6 @@
     textEl.style.removeProperty("--scroll-dist");
     textEl.style.removeProperty("--scroll-duration");
 
-    // Force browser reflow so the animation restarts cleanly from 0px.
     void textEl.offsetWidth;
 
     const overflowPx = textEl.scrollWidth - maskEl.clientWidth;
@@ -389,18 +560,22 @@
     }
   }
 
-  /// Preloads the new album cover in the background and crossfades once ready.
   function crossfadeArtwork(artHash) {
     const nextIdx = 1 - activeArtIdx;
     const nextLayer = artLayers[nextIdx];
     const curLayer = artLayers[activeArtIdx];
 
-    if (artHash <= 0) {
+    const clearToBlank = () => {
       nextLayer.style.backgroundImage = "none";
       nextLayer.classList.add("active");
       curLayer.classList.remove("active");
       glassBgEl.style.backgroundImage = "none";
       activeArtIdx = nextIdx;
+      applyAccents(DEFAULT_ACCENT, DEFAULT_ACCENT2);
+    };
+
+    if (artHash <= 0) {
+      clearToBlank();
       return;
     }
 
@@ -408,6 +583,8 @@
     const img = new Image();
     img.onload = () => {
       if (lastArtHash !== artHash) return;
+      const [a1, a2] = extractVibrantPalette(img);
+      applyAccents(a1, a2);
       const bgVal = `url('${url}')`;
       nextLayer.style.backgroundImage = bgVal;
       nextLayer.classList.add("active");
@@ -415,10 +592,13 @@
       glassBgEl.style.backgroundImage = bgVal;
       activeArtIdx = nextIdx;
     };
+    img.onerror = () => {
+      if (lastArtHash !== artHash) return;
+      clearToBlank();
+    };
     img.src = url;
   }
 
-  /// Smoothly interpolates the progress bar at display refresh rate (60/120/144fps).
   function renderTimelineFrame() {
     let curPos = state.position;
     if (state.is_playing) {
@@ -483,12 +663,12 @@
     const finalH = urlH ?? (cfg.height || 122);
     const finalRadius = urlRadius ?? (cfg.radius ?? 10);
     const finalOpacity = urlOpacity ?? (cfg.opacity ?? 1.0);
-    const finalTheme = urlTheme || cfg.theme || "default";
+    const finalTheme = urlTheme || sanitizeChoice(cfg.theme, VALID_THEMES) || "default";
     const finalFont = urlFont || cfg.font_family || "Segoe UI";
     const finalFontSize = urlFontSize ?? (cfg.font_size || 22);
     const finalToastSec = urlToastSec ?? (cfg.toast_seconds || 8);
 
-    let finalMode = urlMode || cfg.display_mode || "default";
+    let finalMode = urlMode || sanitizeChoice(cfg.display_mode, VALID_MODES) || "default";
     if (urlAlwaysShow === true || (urlMode === null && urlAlwaysShow === null && cfg.always_show)) {
       finalMode = "always";
     } else if (urlAlwaysShow === false && finalMode === "always") {
@@ -561,7 +741,6 @@
       updateScrollAnimation("artist-mask", artistEl);
     }
 
-    // Re-measure text overflow after the 200ms CSS width/height transition completes.
     if (layoutOrTypographyChanged) {
       clearTimeout(layoutTimerId);
       layoutTimerId = setTimeout(refreshBothMarquees, 220);
@@ -571,19 +750,6 @@
     if (artHash !== lastArtHash) {
       lastArtHash = artHash;
       crossfadeArtwork(artHash);
-    }
-
-    if (data.accent?.length === 3 && data.accent2?.length === 3) {
-      const accentKey = `${data.accent.join(",")}|${data.accent2.join(",")}`;
-      if (accentKey !== lastAccentKey) {
-        root.style.setProperty("--accent-r", data.accent[0]);
-        root.style.setProperty("--accent-g", data.accent[1]);
-        root.style.setProperty("--accent-b", data.accent[2]);
-        root.style.setProperty("--accent2-r", data.accent2[0]);
-        root.style.setProperty("--accent2-g", data.accent2[1]);
-        root.style.setProperty("--accent2-b", data.accent2[2]);
-        lastAccentKey = accentKey;
-      }
     }
 
     evaluateVisibility();
@@ -600,23 +766,21 @@
     setTimeout(waitForServerAndReload, 1000);
   }
 
-  function connectWebSocket() {
-    const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${wsProto}//${window.location.host}/ws`);
-
-    ws.onopen = () => { hasConnectedOnce = true; };
-    ws.onmessage = event => {
+  function connectEvents() {
+    const es = new EventSource("/events");
+    es.onopen = () => { hasConnectedOnce = true; };
+    es.onmessage = event => {
       try { applyServerState(JSON.parse(event.data)); } catch (_) {}
     };
-    ws.onclose = () => {
+    es.onerror = () => {
+      es.close();
       isWidgetVisible = false;
       widgetEl.classList.remove("visible");
-      setTimeout(hasConnectedOnce ? waitForServerAndReload : connectWebSocket, 1000);
+      setTimeout(hasConnectedOnce ? waitForServerAndReload : connectEvents, 1000);
     };
-    ws.onerror = () => ws.close();
   }
 
-  connectWebSocket();
+  connectEvents();
 </script>
 </body>
 </html>

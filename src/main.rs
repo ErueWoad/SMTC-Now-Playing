@@ -1,104 +1,132 @@
-// Hides the black command-prompt console window in release builds while keeping
-// it visible during `cargo run` debug builds so you can see error messages.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
 mod metadata;
-mod palette;
 mod server;
 mod smtc;
 mod win32;
 
-use std::net::TcpListener;
+use std::io::ErrorKind;
+use std::net::{TcpListener, TcpStream};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use std::thread;
-use std::time::Duration;
 
-use tokio::sync::{broadcast, watch};
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
+    Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
 };
 use windows::{
-    core::w,
-    Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED},
+    core::{w, HSTRING},
+    Win32::System::Com::COINIT_APARTMENTTHREADED,
     Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, MessageBoxW, PeekMessageW, TranslateMessage, MB_ICONINFORMATION, MB_OK,
-        MSG, PM_REMOVE, WM_QUIT,
+        DispatchMessageW, GetMessageW, MessageBoxW, TranslateMessage, MB_ICONERROR,
+        MB_ICONINFORMATION, MB_OK, MSG,
     },
 };
 
-use crate::config::{lock_shared, SharedApp, CONFIG_SAVE_DEBOUNCE, HOST, PORT};
-use crate::palette::create_tray_icon;
-use crate::server::{broadcast_state, spawn_http_server};
+use crate::config::{
+    lock_shared, write_config_atomic, DisplayMode, SharedApp, CONFIG_SAVE_DEBOUNCE, HOST, PORT,
+};
+use crate::server::{broadcast_state, spawn_http_server, StateHub};
 use crate::smtc::spawn_smtc_poller;
-use crate::win32::{open_url, set_startup_enabled};
+use crate::win32::{
+    current_thread_id, kill_thread_timer, open_url, set_clipboard_text, set_startup_enabled,
+    set_thread_timer, ComGuard, WM_APP_SYNC, WM_TIMER_MSG,
+};
 
-fn main() {
-    // Initialize Windows COM (Component Object Model) in Single-Threaded Apartment
-    // mode on the main thread. Required by Windows UI controls like the system tray.
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+/// Procedurally draws a 64x64 pink rounded-square icon with a white play triangle in memory.
+fn create_tray_icon() -> Icon {
+    const SIZE: u32 = 64;
+    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
+
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+
+            let in_rect = (6.0..=58.0).contains(&fx) && (6.0..=58.0).contains(&fy) && {
+                let dx = fx - fx.clamp(20.0, 44.0);
+                let dy = fy - fy.clamp(20.0, 44.0);
+                (dx * dx + dy * dy) <= 196.0
+            };
+
+            if !in_rect {
+                continue;
+            }
+
+            let in_triangle =
+                (24.0..=46.0).contains(&fx) && (fy - 32.0).abs() <= 14.0 * (46.0 - fx) / 22.0;
+
+            let idx = ((y * SIZE + x) * 4) as usize;
+            let color = if in_triangle {
+                [255, 255, 255, 255]
+            } else {
+                [255, 15, 135, 255]
+            };
+            rgba[idx..idx + 4].copy_from_slice(&color);
+        }
     }
 
-    // Bind to port 8765 immediately. This serves two purposes:
-    // 1. It prepares the network socket for our local web server.
-    // 2. It acts as a single-instance lock: if another copy of the app is already
-    //    running, binding to port 8765 will fail and we can alert the user.
+    Icon::from_rgba(rgba, SIZE, SIZE).expect("Failed to create tray icon")
+}
+
+fn main() {
+    let _com = ComGuard::init(COINIT_APARTMENTTHREADED);
+    let main_thread_id = current_thread_id();
+
     let addr = format!("{HOST}:{PORT}");
+    let widget_url = format!("http://{HOST}:{PORT}/");
+    let preview_url = format!("http://{HOST}:{PORT}/?mode=always");
+    let settings_url = format!("http://{HOST}:{PORT}/settings");
+
     let listener = match TcpListener::bind(&addr) {
-        Ok(l) => {
-            let _ = l.set_nonblocking(true);
-            l
-        }
-        Err(_) => {
-            unsafe {
-                MessageBoxW(
-                    None,
-                    w!("SMTC Now Playing is already running on http://127.0.0.1:8765/\nCheck your Windows System Tray."),
-                    w!("SMTC Now Playing"),
+        Ok(l) => l,
+        Err(err) => {
+            let (body, icon) = if err.kind() == ErrorKind::AddrInUse {
+                (
+                    format!(
+                        "SMTC Now Playing is already running on {widget_url}\nCheck your Windows System Tray."
+                    ),
                     MB_OK | MB_ICONINFORMATION,
-                );
-                CoUninitialize();
+                )
+            } else {
+                (
+                    format!("Failed to bind local server on {addr}:\n{err}"),
+                    MB_OK | MB_ICONERROR,
+                )
+            };
+            let body_h = HSTRING::from(body);
+            // SAFETY: Valid HSTRING and static title passed to Win32 MessageBoxW.
+            unsafe {
+                MessageBoxW(None, &body_h, w!("SMTC Now Playing"), icon);
             }
             return;
         }
     };
 
-    // Create thread-safe containers (`Arc` = Atomic Reference Counted pointer)
-    // so multiple background threads can share access to our app state.
     let shared = Arc::new(Mutex::new(SharedApp::new()));
     let running = Arc::new(AtomicBool::new(true));
     let ui_dirty = Arc::new(AtomicBool::new(false));
+    let hub = Arc::new(StateHub::new());
 
-    // Channels for pushing live JSON updates to WebSocket clients and signaling shutdown.
-    let (ws_tx, _) = broadcast::channel::<String>(32);
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    // Start the background thread that listens to Windows Media (SMTC) events.
     let (poller_thread, poller_handle) =
-        spawn_smtc_poller(Arc::clone(&shared), Arc::clone(&running), ws_tx.clone());
+        spawn_smtc_poller(Arc::clone(&shared), Arc::clone(&running), Arc::clone(&hub));
 
-    // Start the background thread that runs the Axum HTTP/WebSocket server.
     let http_handle = spawn_http_server(
         listener,
         Arc::clone(&shared),
         Arc::clone(&ui_dirty),
+        main_thread_id,
         poller_thread.clone(),
-        ws_tx.clone(),
-        shutdown_rx,
+        Arc::clone(&hub),
     );
 
-    // Read initial checkbox states for the system tray menu.
     let (initial_always_show, initial_startup) = {
         let app = lock_shared(&shared);
         (app.config.always_show, app.run_on_startup)
     };
 
-    // Build the right-click context menu for the system tray icon.
     let menu = Menu::new();
     let always_show_item = CheckMenuItem::new(
         "Always Show (Disable Auto-Hide)",
@@ -108,7 +136,7 @@ fn main() {
     );
     let startup_item = CheckMenuItem::new("Launch at Windows Startup", true, initial_startup, None);
     let settings_item = MenuItem::new("Widget Size, Themes & Settings...", true, None);
-    let copy_url_item = MenuItem::new("Copy OBS URL (http://127.0.0.1:8765/)", true, None);
+    let copy_url_item = MenuItem::new(format!("Copy OBS URL ({widget_url})"), true, None);
     let preview_item = MenuItem::new("Open Preview in Browser", true, None);
     let quit_item = MenuItem::new("Exit", true, None);
 
@@ -123,33 +151,39 @@ fn main() {
         &quit_item,
     ]);
 
-    // Keep `_tray_icon` alive in `main`'s scope; dropping it removes the icon from the tray.
-    let _tray_icon = TrayIconBuilder::new()
+    let tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("SMTC Browser Source (http://127.0.0.1:8765/)")
+        .with_tooltip(format!("SMTC Browser Source ({widget_url})"))
         .with_icon(create_tray_icon())
         .build()
         .expect("Failed to initialize system tray icon");
 
-    let widget_url = format!("http://{HOST}:{PORT}/");
-    let settings_url = format!("http://{HOST}:{PORT}/settings");
-
-    // Main Windows UI event loop.
+    // Event-driven Win32 UI loop: blocks with 0% CPU and 0 wake-ups while idle.
     let mut msg = MSG::default();
+    let mut debounce_timer_id: usize = 0;
+
     while running.load(Ordering::Relaxed) {
-        // Pump pending Windows messages so the system tray icon responds to mouse clicks.
-        unsafe {
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == WM_QUIT {
-                    running.store(false, Ordering::Relaxed);
-                    break;
-                }
+        // SAFETY: `GetMessageW` blocks until a Win32 message or timer arrives for this thread.
+        let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) }.0;
+        if ret <= 0 {
+            running.store(false, Ordering::Relaxed);
+            break;
+        }
+
+        if msg.message == WM_TIMER_MSG
+            && debounce_timer_id != 0
+            && msg.wParam.0 == debounce_timer_id
+        {
+            kill_thread_timer(debounce_timer_id);
+            debounce_timer_id = 0;
+        } else if msg.message != WM_APP_SYNC {
+            // SAFETY: Standard Win32 message translation and dispatch.
+            unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }
 
-        // Open the settings dashboard when the user left-clicks the tray icon.
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -161,30 +195,34 @@ fn main() {
             }
         }
 
-        // Handle clicks on items inside the right-click tray menu.
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == always_show_item.id() {
                 let checked = always_show_item.is_checked();
-                {
+                let to_save = {
                     let mut app = lock_shared(&shared);
                     app.config.always_show = checked;
-                    app.config.display_mode = if checked { "always" } else { "default" }.into();
-                    app.save_config_now();
+                    app.config.display_mode = if checked {
+                        DisplayMode::Always
+                    } else {
+                        DisplayMode::Default
+                    };
+                    app.prepare_config_save()
+                };
+                if let Some((path, json)) = to_save {
+                    write_config_atomic(&path, &json);
                 }
-                broadcast_state(&shared, &ws_tx);
+                broadcast_state(&shared, &hub);
             } else if event.id == startup_item.id() {
                 let actual = set_startup_enabled(startup_item.is_checked());
                 startup_item.set_checked(actual);
                 lock_shared(&shared).run_on_startup = actual;
-                broadcast_state(&shared, &ws_tx);
+                broadcast_state(&shared, &hub);
             } else if event.id == settings_item.id() {
                 open_url(&settings_url);
             } else if event.id == copy_url_item.id() {
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    let _ = clipboard.set_text(widget_url.clone());
-                }
+                let _ = set_clipboard_text(&widget_url);
             } else if event.id == preview_item.id() {
-                open_url(&widget_url);
+                open_url(&preview_url);
             } else if event.id == quit_item.id() {
                 running.store(false, Ordering::Relaxed);
                 break;
@@ -195,7 +233,6 @@ fn main() {
             break;
         }
 
-        // If settings were changed via the web dashboard, sync the tray menu checkboxes.
         if ui_dirty.swap(false, Ordering::Acquire) {
             let app = lock_shared(&shared);
             if always_show_item.is_checked() != app.config.always_show {
@@ -206,36 +243,51 @@ fn main() {
             }
         }
 
-        // Flush pending configuration changes to disk once the debounce timer expires.
-        {
+        let (save_payload, remaining_ms) = {
             let mut app = lock_shared(&shared);
-            if let Some(dirty_at) = app.config_dirty_at {
-                if dirty_at.elapsed() >= CONFIG_SAVE_DEBOUNCE {
-                    app.save_config_now();
+            match app.config_dirty_at {
+                Some(dirty_at) => {
+                    let elapsed = dirty_at.elapsed();
+                    if elapsed >= CONFIG_SAVE_DEBOUNCE {
+                        (app.prepare_config_save(), None)
+                    } else {
+                        let rem = (CONFIG_SAVE_DEBOUNCE - elapsed).as_millis().max(15) as u32;
+                        (None, Some(rem))
+                    }
                 }
+                None => (None, None),
             }
-        }
+        };
 
-        // Sleep briefly (~60Hz) so the main loop uses ~0% CPU while idle.
-        thread::sleep(Duration::from_millis(16));
+        if let Some((path, json)) = save_payload {
+            kill_thread_timer(debounce_timer_id);
+            debounce_timer_id = 0;
+            write_config_atomic(&path, &json);
+        } else if let Some(ms) = remaining_ms {
+            debounce_timer_id = set_thread_timer(debounce_timer_id, ms);
+        }
     }
 
-    // Graceful shutdown: wake up the poller thread and stop the web server.
-    poller_thread.unpark();
-    let _ = shutdown_tx.send(true);
+    kill_thread_timer(debounce_timer_id);
+    drop(tray_icon);
 
-    // Ensure any unsaved settings are written before exiting.
-    {
+    poller_thread.unpark();
+    hub.shutdown();
+    // Unblock `TcpListener::incoming()` so the HTTP server thread exits immediately.
+    let _ = TcpStream::connect(&addr);
+
+    let final_save = {
         let mut app = lock_shared(&shared);
         if app.config_dirty_at.is_some() {
-            app.save_config_now();
+            app.prepare_config_save()
+        } else {
+            None
         }
+    };
+    if let Some((path, json)) = final_save {
+        write_config_atomic(&path, &json);
     }
 
     let _ = poller_handle.join();
     let _ = http_handle.join();
-
-    unsafe {
-        CoUninitialize();
-    }
 }
