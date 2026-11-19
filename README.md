@@ -93,16 +93,15 @@ smtc-now-playing/
 ├── Cargo.toml
 ├── build.rs
 └── src/
-    ├── main.rs          # Entry point, system tray menu & Win32 message loop
-    ├── config.rs        # Config, MediaState, SharedApp & JSON persistence
-    ├── win32.rs         # Registry Run key & ShellExecuteW FFI helpers
-    ├── metadata.rs      # Title/artist sanitizer & /text template formatter
-    ├── palette.rs       # Artwork downsampling, HSV clustering & tray icon
-    ├── smtc.rs          # WinRT MediaManager hooks & event-driven poller thread
-    ├── server.rs        # tiny_http server & route handlers
+    ├── main.rs            # Entry point, procedural tray icon & event-driven Win32 loop
+    ├── config.rs          # Config, MediaState, SharedApp & atomic JSON persistence
+    ├── win32.rs           # Registry Run key, clipboard, COM guard & Win32 FFI helpers
+    ├── metadata.rs        # Title/artist sanitizer & /text template formatter
+    ├── smtc.rs            # WinRT MediaManager hooks, poller thread & raw art reader
+    ├── server.rs          # Sync HTTP/1.1 + SSE (/events) server & route handlers
     └── assets/
-        ├── widget.html  # Browser source UI
-        └── settings.html# Settings dashboard UI
+        ├── widget.html    # Browser source UI & canvas-based accent color extraction
+        └── settings.html  # Settings dashboard & live preview UI
 ~~~
 
 ### Build Standalone `.exe`
