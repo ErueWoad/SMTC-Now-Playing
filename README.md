@@ -117,7 +117,7 @@ cargo build --release
 
 ## 🤖 Disclaimer
 
-This project was made with the help of **Gemini Argon**.
+This project was made with the help of **Gemini**.
 
 ---
 
