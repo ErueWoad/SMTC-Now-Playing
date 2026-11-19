@@ -5,6 +5,6 @@ fn main() {
     if Path::new("icon.ico").exists() {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("icon.ico");
-        let _ = res.compile();
+        res.compile().expect("Failed to compile Windows icon resource");
     }
 }

@@ -14,17 +14,18 @@ A lightweight, native **Rust** Windows utility that reads currently playing trac
 
 ## ✨ Features
 
-* **Native Rust Performance**: Compiles into a standalone **~2 MB `.exe`** with zero external runtime dependencies, instant startup, and **~4 MB RAM** usage.
-* **Event-Driven Universal Media Support**: Hooks directly into Windows SMTC session, playback, and metadata change events for instant reaction times across Spotify, Apple Music, YouTube in Chrome, Edge, or Firefox, and more.
+* **Ultra-Lightweight Native Rust**: Compiles into a standalone `.exe` with minimal dependencies (no async runtime, no image-processing crate, and no external runtime dependencies), instant startup, low RAM footprint, and zero idle wake-ups via an event-driven Win32 tray loop.
+* **Event-Driven Universal Media Support**: Hooks directly into Windows SMTC session, playback, timeline, and metadata change events for instant reaction times across Spotify, Apple Music, YouTube in Chrome, Edge, or Firefox, and more—including multi-instance apps and live-stream timeline offsets.
+* **Real-Time Server-Sent Events (`/events`)**: Uses a lightweight, zero-dependency synchronous HTTP/1.1 + SSE server to push live track and settings updates immediately to OBS and the settings dashboard without polling.
 * **Per-App Session Filtering**: Allow-list or block-list specific applications (e.g., locking the widget to `Spotify.exe` or ignoring `chrome.exe`) directly from the web settings dashboard so browser videos never hijack your music overlay.
 * **Automatic Title & Artist Sanitizer**: Strips noisy video and stream suffixes such as `(Official Music Video)`, `[Lyrics]`, `- YouTube`, and YouTube's `- Topic` channel suffix.
-* **Dual-Tone Vibrant Accent Extraction**: Samples album art in HSV color space—filtering out near-black, pure white, and desaturated grey pixels—to extract primary and secondary accent hues (`--accent` and `--accent2`) for a dual-tone neon progress bar and ambient card glow.
-* **Decoupled Binary `/art` Caching**: Serves album art as immutable, FNV-1a hash-versioned PNGs (`/art?v=<hash>`) so `/state` JSON polls stay under ~200 bytes.
+* **Browser-Side Dual-Tone Accent Extraction**: Serves raw cover art straight from SMTC without server-side decoding, then samples it in the browser via an offscreen `<canvas>` in HSV color space—filtering out near-black and desaturated pixels to extract primary and secondary accent hues (`--accent` and `--accent2`) for the progress bar and ambient card glow.
+* **Decoupled Binary `/art` Caching**: Sniffs image MIME types (`PNG`, `JPEG`, `WebP`, `GIF`, `BMP`) and serves immutable, 32-bit FNV-1a hash-versioned artwork (`/art?v=<hash>`) so live state payloads stay tiny.
 * **4 Built-In Visual Themes & Toast Mode**: Switch between `default` (Dual-Tone Glow), `vinyl` (Spinning Record), `glass` (Frosted Art Blur), and `compact` (Minimal Bar), or enable **Track Change Toast** mode to pop the widget in temporarily when a new song starts.
-* **Custom Fonts & Proportional Sizing (v2.2.7)**: Choose from curated font presets (`Segoe UI`, `Inter`, `Poppins`, `Montserrat`, `Roboto`, `Outfit`, `Space Grotesk`, `Oswald`, `JetBrains Mono`, `Consolas`, `Georgia`) or enter any custom installed Windows font or Google Font, with adjustable base font sizing (`12–48 px`) and automatic marquee scroll recalculation.
+* **Custom Fonts & Proportional Sizing**: Choose from curated font presets (`Segoe UI`, `Inter`, `Poppins`, `Montserrat`, `Roboto`, `Outfit`, `Space Grotesk`, `Oswald`, `JetBrains Mono`, `Consolas`, `Georgia`) or enter any installed Windows font or Google Font, with adjustable base font sizing (`12–48 px`) and automatic marquee scroll recalculation.
 * **Plaintext `/text` Endpoint for Chat Bots**: Exposes a customizable plaintext route (`http://127.0.0.1:8765/text`) for Streamer.bot, Nightbot, or Mix It Up `!song` commands.
-* **Headless System Tray & Windows Startup Toggle**: Runs silently in the Windows System Tray with quick toggles for **Always Show**, **Launch at Windows Startup**, live settings, and OBS URL copying.
-* **Smooth Timeline Interpolation**: Interpolates playback progress at 60 FPS between SMTC updates so the progress bar and `MM:SS` / `H:MM:SS` timestamps advance smoothly.
+* **Headless System Tray & Windows Startup Toggle**: Runs silently in the Windows System Tray with native Win32 clipboard URL copying, instant browser preview (`/?mode=always`), and quick toggles for **Always Show** and **Launch at Windows Startup**.
+* **Smooth Timeline Interpolation**: Interpolates playback progress at your display's refresh rate (`requestAnimationFrame`) between SMTC updates so the progress bar and `MM:SS` / `H:MM:SS` timestamps advance smoothly.
 
 ---
 
@@ -43,7 +44,7 @@ A lightweight, native **Rust** Windows utility that reads currently playing trac
 ## 🎨 Customization
 
 ### 1. Live Web Settings Dashboard & Auto-Save
-Left-click the system tray icon (or right-click and choose **Widget Size, Themes & Settings...**) to open `http://127.0.0.1:8765/settings` in your browser. All changes update OBS in real time and are atomically saved to `%APPDATA%\SMTC-Now-Playing\config.json`:
+Left-click the system tray icon (or right-click and choose **Widget Size, Themes & Settings...**) to open `http://127.0.0.1:8765/settings` in your browser. All changes update OBS in real time and are atomically saved to `%APPDATA%\SMTC-Now-Playing\config.json` (if a config file ever becomes malformed, it is backed up to `config.json.bak` rather than silently wiped):
 * **Visual Theme**: `default`, `vinyl`, `glass`, or `compact`
 * **Font Family & Size**: Choose from built-in presets or select **Custom Font...** to enter any installed Windows font or Google Font family name, and adjust **Font Size** (`12–48 px`, default `22 px`) with artist and timestamp text scaling proportionally
 * **Visibility Mode**: `default` (Show While Playing), `always` (Always Show / Show While Paused), or `toast` (Auto-Hide on Track Change with configurable `3–60 s` duration)
@@ -75,9 +76,33 @@ http://127.0.0.1:8765/?theme=glass&font=Inter&font_size=24&mode=toast&toast=10&w
 ~~~
 
 ### 3. Plaintext `/text` Endpoint for Stream Bots
-Query `http://127.0.0.1:8765/text` from Streamer.bot, Nightbot, or custom scripts to get a clean plaintext string of the active track. You can customize the default format in `/settings` or override it on the fly via `?format=`:
+Query `http://127.0.0.1:8765/text` from Streamer.bot, Nightbot, or custom scripts to get a clean plaintext string of the active track. You can customize the default format in `/settings` or override it on the fly via `?format=` (up to 512 bytes):
 * **Supported Placeholders**: `{title}`, `{artist}`, `{album}`, `{app}`, `{pos}`, `{dur}`, `{status}`
 * **Example**: `http://127.0.0.1:8765/text?format=Now+Playing:+{title}+by+{artist}+[{pos}/{dur}]`
+
+---
+
+## 🔌 Local API & Architecture
+
+The server binds exclusively to loopback (`127.0.0.1:8765`) so only local applications (like OBS, browsers, and chat bot scripts) can connect.
+
+### Endpoints
+
+| Method & Path | Description |
+| :--- | :--- |
+| `GET /` (or `/index.html`) | Serves the embedded OBS Browser Source widget (`widget.html`) |
+| `GET /settings` | Serves the live settings dashboard and interactive preview (`settings.html`) |
+| `GET /events` | Server-Sent Events (`text/event-stream`) feed pushing live JSON state updates (`Host`/`Origin` validated) |
+| `GET /state` | One-shot JSON snapshot of current track metadata, interpolated position, config, and startup status |
+| `GET /art` | Raw album cover bytes with detected image MIME type (`immutable` caching with `?v=<hash>`, `no-store` without) |
+| `GET /text` | Plaintext formatted track status with optional `?format=` template override |
+| `POST /config` | Validates, applies, and debounces saving global settings (`application/json` + local `Host`/`Origin` check, 8 KB limit) |
+| `POST /startup` | Enables or disables launching at Windows sign-in (`application/json` + local `Host`/`Origin` check, 1 KB limit) |
+
+### Architecture Overview
+* **UI / Tray Thread (`main.rs`)**: Owns the system tray icon and blocks on `GetMessageW` with an on-demand Win32 timer for debounced config writes—consuming 0% CPU while idle.
+* **SMTC Listener Thread (`smtc.rs`)**: Subscribes to WinRT `GlobalSystemMediaTransportControlsSessionManager` and session events, sleeping via `thread::park()` until Windows reports a change.
+* **Sync HTTP + SSE Server (`server.rs`)**: Built directly on `std::net::TcpListener` with a `Mutex`/`Condvar` `StateHub` for zero-copy SSE fan-out—eliminating async runtime bloat while serving embedded HTML assets directly from the binary.
 
 ---
 
@@ -85,7 +110,7 @@ Query `http://127.0.0.1:8765/text` from Streamer.bot, Nightbot, or custom script
 
 ### Requirements
 * **OS**: Windows 10 / Windows 11
-* **Toolchain**: [Rust (`rustup` / `cargo`)](https://rustup.rs/) with the MSVC build tools
+* **Toolchain**: [Rust 1.85+ (`rustup` / `cargo`)](https://rustup.rs/) (Edition 2024) with the MSVC build tools
 
 ### Project Structure
 ~~~text

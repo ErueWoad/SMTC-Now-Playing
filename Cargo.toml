@@ -1,44 +1,26 @@
 [package]
 name = "smtc-now-playing"
-version = "2.2.8"
-edition = "2021"
+version = "2.2.9"
+edition = "2024"
 
 [dependencies]
-# Cross-platform clipboard access for the "Copy OBS URL" tray button
-arboard = "3.4"
-# Async web framework for serving the widget HTML, REST API, and WebSockets
-axum = { version = "0.8", features = ["ws"] }
-# Image decoding and resizing for album art thumbnails
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
-# Serialization library to convert Rust structs to/from JSON
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-# Async runtime required by Axum to handle network connections concurrently
-tokio = { version = "1.43", features = ["rt", "net", "sync", "macros", "time"] }
-# Creates and manages the Windows System Tray icon and right-click context menu
-tray-icon = "0.19"
-
-[dependencies.windows]
-version = "0.58"
-# We only enable the exact Windows API modules we need to keep compile times fast
-features = [
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tray-icon = "0.20"
+windows = { version = "0.60", features = [
     "Foundation",
-    "Foundation_Collections",
     "Media_Control",
     "Storage_Streams",
-    "Win32_Foundation",
     "Win32_System_Com",
     "Win32_UI_WindowsAndMessaging",
-]
+] }
 
 [build-dependencies]
-# Embeds the application icon and metadata into the compiled Windows .exe
 winresource = "0.1"
 
-# Optimizes the final release executable for small size and high speed
 [profile.release]
-opt-level = "s"       # Optimize for binary size while keeping fast execution
-lto = true            # Link-Time Optimization: removes dead code across all crates
-codegen-units = 1     # Compiles the whole program as one unit for better optimization
-panic = "abort"       # Removes stack-unwinding overhead to shrink the .exe
-strip = true          # Strips debug symbols from the final binary
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SMTC Now Playing — Settings</title>
+<style>
+  :root {
+    --bg-sidebar: #141418;
+    --bg-stage: #0d0d10;
+    --bg-card: #1c1c22;
+    --bg-input: #25252d;
+    --bg-input-hover: #2d2d37;
+    --border: rgba(255, 255, 255, 0.08);
+    --accent: #ff0f87;
+    --accent-hover: #ff2a95;
+    --accent-2: #00d2ff;
+    --text-main: #f2f2f7;
+    --text-muted: #9494a3;
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg-stage);
+    color: var(--text-main);
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+    display: flex;
+  }
+
+  .sidebar {
+    width: 460px;
+    min-width: 400px;
+    max-width: 100%;
+    height: 100vh;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    z-index: 10;
+  }
+
+  .sidebar-top {
+    padding: 18px 20px 14px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(20, 20, 24, 0.96);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .brand-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .brand-title {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    color: #fff;
+  }
+
+  .brand-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+  }
+
+  .url-mode-tabs {
+    display: flex;
+    gap: 4px;
+    background: var(--bg-card);
+    padding: 3px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+  }
+
+  .url-tab {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .url-tab.active {
+    background: var(--bg-input-hover);
+    color: #fff;
+  }
+
+  .copy-url-box {
+    position: relative;
+    width: 100%;
+    background: #0d0d10;
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    cursor: pointer;
+    overflow: hidden;
+    transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  }
+
+  .copy-url-box:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(255, 15, 135, 0.18);
+  }
+
+  .copy-url-text {
+    font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+    font-size: 12px;
+    color: var(--accent-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+  }
+
+  .copy-url-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(255, 15, 135, 0.92);
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.16s ease;
+  }
+
+  .copy-url-box:hover .copy-url-overlay,
+  .copy-url-box.copied .copy-url-overlay {
+    opacity: 1;
+  }
+
+  .copy-url-box.copied .copy-url-overlay {
+    background: #10b981;
+  }
+
+  .top-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .btn {
+    background: var(--bg-input);
+    color: var(--text-main);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.08s ease;
+    text-align: center;
+  }
+
+  .btn:hover { background: var(--bg-input-hover); border-color: rgba(255, 255, 255, 0.18); }
+  .btn:active { transform: translateY(1px); }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .btn-danger { background: #e11d48; border-color: #e11d48; color: #fff; }
+  .btn-danger:hover { background: #f43f5e; }
+
+  .sidebar-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px 20px 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .sidebar-content::-webkit-scrollbar { width: 6px; }
+  .sidebar-content::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 999px; }
+
+  .section { display: flex; flex-direction: column; gap: 14px; }
+
+  .section-header {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.9px;
+    color: var(--accent);
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .setting-item { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .setting-item.column { flex-direction: column; align-items: stretch; gap: 8px; }
+  .setting-item.hidden { display: none; }
+  .setting-info { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+  .setting-label { font-size: 13.5px; font-weight: 600; color: var(--text-main); }
+  .setting-desc { font-size: 12px; color: var(--text-muted); line-height: 1.35; }
+  .setting-control { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
+
+  select, input[type="text"], input[type="number"] {
+    color-scheme: dark;
+    background: var(--bg-input);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-sm);
+    padding: 7px 10px;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+
+  select:focus, input[type="text"]:focus, input[type="number"]:focus {
+    border-color: var(--accent);
+    background: var(--bg-input-hover);
+  }
+
+  select { min-width: 185px; cursor: pointer; }
+  input[type="number"] { width: 78px; }
+  input[type="text"].full-input { width: 100%; }
+
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 105px;
+    height: 5px;
+    background: var(--bg-input);
+    border-radius: 999px;
+    outline: none;
+    cursor: pointer;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid #fff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  }
+
+  .switch { position: relative; display: inline-block; width: 42px; height: 24px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; cursor: pointer; inset: 0;
+    background-color: var(--bg-input);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    transition: 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+    border-radius: 999px;
+  }
+  .slider::before {
+    position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px;
+    background-color: #c9c9d6;
+    transition: 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+    border-radius: 50%;
+  }
+  .switch input:checked + .slider { background-color: var(--accent); border-color: var(--accent); }
+  .switch input:checked + .slider::before { transform: translateX(18px); background-color: #fff; }
+
+  .link-btn {
+    background: none; border: none; color: var(--accent-2);
+    font-size: 12px; font-weight: 600; cursor: pointer; padding: 0; text-align: left;
+  }
+  .link-btn:hover { text-decoration: underline; }
+
+  .sources-drawer {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: 10px 12px;
+    display: none; flex-direction: column; gap: 8px;
+  }
+  .sources-drawer.open { display: flex; }
+
+  .pill-list, .token-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+  .pill {
+    font-size: 11.5px; background: var(--bg-input);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 4px 10px; border-radius: 999px; cursor: pointer;
+    color: var(--text-main); transition: all 0.14s ease;
+  }
+  .pill:hover { border-color: var(--accent); color: #fff; }
+  .pill.active { background: rgba(255, 15, 135, 0.2); border-color: var(--accent); color: #fff; }
+
+  .token-chip {
+    font-family: Consolas, monospace; font-size: 11px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    color: var(--text-muted); padding: 2px 7px; border-radius: 4px; cursor: pointer;
+  }
+  .token-chip:hover { color: #fff; border-color: var(--accent-2); }
+
+  .bridge-grid { display: grid; grid-template-columns: 1fr 110px; gap: 8px; }
+  .readonly-box {
+    background: #101014; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 7px 10px;
+    font-family: Consolas, monospace; font-size: 12.5px; color: var(--text-muted);
+  }
+
+  .stage {
+    flex: 1; height: 100vh; position: relative;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    overflow: hidden; transition: background 0.2s ease;
+  }
+  .stage.bg-checker { background-image: repeating-conic-gradient(#121217 0% 25%, #181820 0% 50%); background-size: 24px 24px; }
+  .stage.bg-dark { background: #09090b; }
+  .stage.bg-light { background: #e4e4e7; }
+  .stage.bg-green { background: #00b140; }
+
+  .stage-top-bar {
+    position: absolute; top: 18px; right: 20px;
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(20, 20, 24, 0.88); backdrop-filter: blur(10px);
+    border: 1px solid var(--border); padding: 5px 8px; border-radius: var(--radius-md); z-index: 5;
+  }
+  .stage-top-label { font-size: 11px; color: var(--text-muted); margin-right: 4px; font-weight: 600; }
+  .bg-swatch {
+    border: 1px solid rgba(255, 255, 255, 0.2); background: var(--bg-input);
+    color: var(--text-main); font-size: 11px; font-weight: 600;
+    padding: 4px 8px; border-radius: 5px; cursor: pointer;
+  }
+  .bg-swatch.active { border-color: var(--accent); background: rgba(255, 15, 135, 0.22); color: #fff; }
+
+  .preview-wrapper {
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px; max-width: 100%; max-height: calc(100vh - 120px); overflow: auto;
+  }
+  iframe#preview { border: none; background: transparent; overflow: hidden; transition: width 0.2s ease, height 0.2s ease; }
+
+  .stage-hud {
+    position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: rgba(20, 20, 24, 0.9); backdrop-filter: blur(12px);
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 8px 18px; display: flex; align-items: center; gap: 12px;
+    max-width: 90%; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  }
+  .status-indicator { width: 8px; height: 8px; border-radius: 50%; background: #71717a; flex-shrink: 0; }
+  .status-indicator.playing { background: #10b981; box-shadow: 0 0 8px #10b981; }
+  .hud-track { font-size: 12.5px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 360px; }
+  .hud-app-badge {
+    font-size: 11px; font-weight: 600; color: var(--accent-2);
+    background: rgba(0, 210, 255, 0.12); border: 1px solid rgba(0, 210, 255, 0.25);
+    padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+  }
+
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center;
+    z-index: 100; padding: 20px;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: var(--bg-sidebar); border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-lg); width: 100%; max-width: 440px; padding: 22px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6); display: flex; flex-direction: column; gap: 14px;
+  }
+  .modal-title { font-size: 16px; font-weight: 700; color: #fff; }
+  .modal-desc { font-size: 13px; color: var(--text-muted); line-height: 1.4; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+  @media (max-width: 900px) {
+    body { flex-direction: column; overflow-y: auto; height: auto; }
+    .sidebar { width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+    .stage { min-height: 360px; height: auto; padding: 60px 16px; }
+  }
+</style>
+</head>
+<body>
+
+  <aside class="sidebar">
+    <div class="sidebar-top">
+      <div class="brand-row">
+        <div class="brand-title">
+          <span class="brand-dot"></span>
+          <span>SMTC Now Playing</span>
+        </div>
+        <div class="url-mode-tabs" title="Choose which URL to display and copy">
+          <button type="button" class="url-tab active" data-url-mode="override">Widget URL</button>
+          <button type="button" class="url-tab" data-url-mode="global">Global</button>
+          <button type="button" class="url-tab" data-url-mode="text">/text</button>
+        </div>
+      </div>
+
+      <div class="copy-url-box" id="copy-url-box" title="Click to copy URL">
+        <div class="copy-url-text" id="top-url-display">http://127.0.0.1:8765/</div>
+        <div class="copy-url-overlay" id="copy-url-overlay">Click to copy URL</div>
+      </div>
+
+      <div class="top-actions">
+        <button type="button" class="btn" id="btn-open-defaults">Load Default Settings</button>
+        <button type="button" class="btn" id="btn-open-load">Load Settings</button>
+      </div>
+    </div>
+
+    <div class="sidebar-content">
+      <div class="section">
+        <div class="section-header">Appearance</div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="theme">Theme</label>
+            <div class="setting-desc">Visual layout preset for the browser source</div>
+          </div>
+          <div class="setting-control">
+            <select id="theme">
+              <option value="default">Standard (Dual-Tone Glow)</option>
+              <option value="vinyl">Vinyl (Spinning Record)</option>
+              <option value="glass">Glass (Frosted Art Blur)</option>
+              <option value="compact">Compact (Minimal Bar)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="font">Font Family</label>
+            <div class="setting-desc">Typeface used for track title, artist, and timestamps</div>
+          </div>
+          <div class="setting-control">
+            <select id="font">
+              <option value="Segoe UI">Segoe UI (Default)</option>
+              <option value="Inter">Inter</option>
+              <option value="Poppins">Poppins</option>
+              <option value="Montserrat">Montserrat</option>
+              <option value="Roboto">Roboto</option>
+              <option value="Outfit">Outfit</option>
+              <option value="Space Grotesk">Space Grotesk</option>
+              <option value="Oswald">Oswald</option>
+              <option value="JetBrains Mono">JetBrains Mono</option>
+              <option value="Consolas">Consolas</option>
+              <option value="Georgia">Georgia</option>
+              <option value="__custom__">Custom Font...</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-item column hidden" id="custom-font-row">
+          <div class="setting-info">
+            <label class="setting-label" for="font-custom">Custom Font Name</label>
+            <div class="setting-desc">Enter any installed Windows font or Google Font family name</div>
+          </div>
+          <input id="font-custom" class="full-input" type="text" placeholder="e.g. Bahnschrift, Fira Code, Bebas Neue">
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="fs">Font Size</label>
+            <div class="setting-desc">Title size in pixels; artist &amp; time scale proportionally (12 – 48)</div>
+          </div>
+          <div class="setting-control">
+            <input id="fs-range" type="range" min="12" max="48" step="1" value="22">
+            <input id="fs" type="number" min="12" max="48" step="1" value="22">
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="w">Widget Width</label>
+            <div class="setting-desc">Horizontal width in pixels (260 – 1920)</div>
+          </div>
+          <div class="setting-control">
+            <input id="w-range" type="range" min="260" max="1200" step="10" value="510">
+            <input id="w" type="number" min="260" max="1920" step="10" value="510">
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="h">Widget Height</label>
+            <div class="setting-desc">Vertical height in pixels (80 – 600)</div>
+          </div>
+          <div class="setting-control">
+            <input id="h-range" type="range" min="80" max="320" step="2" value="122">
+            <input id="h" type="number" min="80" max="600" step="2" value="122">
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="r">Corner Radius</label>
+            <div class="setting-desc">Card border roundness in pixels (0 – 60)</div>
+          </div>
+          <div class="setting-control">
+            <input id="r-range" type="range" min="0" max="60" step="1" value="10">
+            <input id="r" type="number" min="0" max="60" step="1" value="10">
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="o">Card Opacity</label>
+            <div class="setting-desc">Background surface opacity (0.00 – 1.00)</div>
+          </div>
+          <div class="setting-control">
+            <input id="o-range" type="range" min="0" max="1" step="0.05" value="1.0">
+            <input id="o" type="number" min="0" max="1" step="0.05" value="1.0">
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-header">General</div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="show-paused">Show While Paused</label>
+            <div class="setting-desc">If enabled, the widget will be visible even when the track is paused.</div>
+          </div>
+          <div class="setting-control">
+            <label class="switch"><input id="show-paused" type="checkbox"><span class="slider"></span></label>
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="auto-hide-toast">Auto-Hide on Track Change</label>
+            <div class="setting-desc">If enabled, the widget will show for a set duration whenever a new track starts.</div>
+          </div>
+          <div class="setting-control">
+            <label class="switch"><input id="auto-hide-toast" type="checkbox"><span class="slider"></span></label>
+          </div>
+        </div>
+
+        <div class="setting-item hidden" id="toast-duration-row">
+          <div class="setting-info">
+            <label class="setting-label" for="toast">Display Duration (seconds)</label>
+            <div class="setting-desc">How long the widget should remain visible.</div>
+          </div>
+          <div class="setting-control">
+            <input id="toast" type="number" min="3" max="60" step="1" value="8">
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="clean">Clean Noisy Video Titles</label>
+            <div class="setting-desc">Strips tags like (Official Music Video), [Lyrics], and platform suffixes.</div>
+          </div>
+          <div class="setting-control">
+            <label class="switch"><input id="clean" type="checkbox" checked><span class="slider"></span></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-header">App Source Filtering</div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="fmode">Filter Mode</label>
+            <div class="setting-desc">Control which Windows media sessions are tracked</div>
+          </div>
+          <div class="setting-control">
+            <select id="fmode">
+              <option value="all">Track All Media Apps</option>
+              <option value="allow">Included Apps Only</option>
+              <option value="block">Excluded Apps</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-item column">
+          <div class="setting-info">
+            <label class="setting-label" id="flist-label" for="flist">App Filter List</label>
+            <div class="setting-desc" id="flist-desc">Comma-separated app names or keywords (e.g. Spotify, chrome).</div>
+          </div>
+          <input id="flist" class="full-input" type="text" placeholder="e.g. Spotify.exe, chrome.exe">
+          <button type="button" class="link-btn" id="toggle-sources-btn">View active sources ▾</button>
+          <div class="sources-drawer" id="sources-drawer">
+            <div class="setting-desc">Click an active media source to add or remove it:</div>
+            <div class="pill-list" id="session-pills"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-header">Chat Bot Plaintext (/text)</div>
+
+        <div class="setting-item column">
+          <div class="setting-info">
+            <label class="setting-label" for="tfmt">Format Template</label>
+            <div class="setting-desc">Plaintext response served at <code>http://127.0.0.1:8765/text</code></div>
+          </div>
+          <input id="tfmt" class="full-input" type="text" value="{artist} — {title}">
+          <div class="token-chips">
+            <span class="token-chip" data-token="{title}">{title}</span>
+            <span class="token-chip" data-token="{artist}">{artist}</span>
+            <span class="token-chip" data-token="{album}">{album}</span>
+            <span class="token-chip" data-token="{pos}">{pos}</span>
+            <span class="token-chip" data-token="{dur}">{dur}</span>
+            <span class="token-chip" data-token="{app}">{app}</span>
+            <span class="token-chip" data-token="{status}">{status}</span>
+          </div>
+        </div>
+
+        <div class="setting-item column">
+          <div class="setting-info">
+            <label class="setting-label" for="tidle">Idle Fallback Text</label>
+            <div class="setting-desc">Returned by <code>/text</code> when no media is playing</div>
+          </div>
+          <input id="tidle" class="full-input" type="text" value="No track playing">
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-header">SMTC Bridge &amp; System</div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="startup">Launch at Windows Startup</label>
+            <div class="setting-desc">Automatically start in the system tray when you sign in.</div>
+          </div>
+          <div class="setting-control">
+            <label class="switch"><input id="startup" type="checkbox"><span class="slider"></span></label>
+          </div>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label class="setting-label" for="sync-global">Save Edits to Global Config</label>
+            <div class="setting-desc">Uncheck to build a per-source URL without overwriting saved global defaults.</div>
+          </div>
+          <div class="setting-control">
+            <label class="switch"><input id="sync-global" type="checkbox" checked><span class="slider"></span></label>
+          </div>
+        </div>
+
+        <div class="setting-item column">
+          <div class="setting-info">
+            <div class="setting-label">Local Server Endpoint</div>
+            <div class="setting-desc">Address and port serving OBS Browser Sources</div>
+          </div>
+          <div class="bridge-grid">
+            <div class="readonly-box">127.0.0.1</div>
+            <div class="readonly-box">8765</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="stage bg-checker" id="stage">
+    <div class="stage-top-bar">
+      <span class="stage-top-label">Preview Backdrop:</span>
+      <button type="button" class="bg-swatch active" data-bg="bg-checker">Grid</button>
+      <button type="button" class="bg-swatch" data-bg="bg-dark">Dark</button>
+      <button type="button" class="bg-swatch" data-bg="bg-light">Light</button>
+      <button type="button" class="bg-swatch" data-bg="bg-green">Chroma</button>
+    </div>
+
+    <div class="preview-wrapper">
+      <iframe id="preview" src="/?mode=always" width="550" height="162"></iframe>
+    </div>
+
+    <div class="stage-hud">
+      <span class="status-indicator" id="hud-dot"></span>
+      <span class="hud-track" id="live-title">Waiting for Media...</span>
+      <span class="hud-app-badge" id="live-sub">Idle</span>
+    </div>
+  </main>
+
+  <div class="modal-backdrop" id="modal-load">
+    <div class="modal">
+      <div class="modal-title">Load Settings</div>
+      <div class="modal-desc">Paste in your existing widget URL to import its theme, dimensions, and visibility settings:</div>
+      <input id="import-url-input" class="full-input" type="text" placeholder="http://127.0.0.1:8765/?theme=vinyl&w=510...">
+      <div class="modal-actions">
+        <button type="button" class="btn" id="btn-cancel-load">Cancel</button>
+        <button type="button" class="btn btn-primary" id="btn-confirm-load">Load Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modal-defaults">
+    <div class="modal">
+      <div class="modal-title">Load Defaults</div>
+      <div class="modal-desc">Are you sure you want to reset all widget settings back to their defaults?</div>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="btn-cancel-defaults">No</button>
+        <button type="button" class="btn btn-danger" id="btn-confirm-defaults">Yes</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const BASE_URL = "http://127.0.0.1:8765";
+  const VALID_THEMES = new Set(["default", "vinyl", "glass", "compact"]);
+  const VALID_MODES = new Set(["default", "always", "toast"]);
+  const el = id => document.getElementById(id);
+
+  const wEl = el("w"), wRangeEl = el("w-range");
+  const hEl = el("h"), hRangeEl = el("h-range");
+  const rEl = el("r"), rRangeEl = el("r-range");
+  const oEl = el("o"), oRangeEl = el("o-range");
+  const fsEl = el("fs"), fsRangeEl = el("fs-range");
+
+  const themeEl = el("theme"), fontEl = el("font");
+  const customFontRowEl = el("custom-font-row"), fontCustomEl = el("font-custom");
+  const showPausedEl = el("show-paused"), autoHideToastEl = el("auto-hide-toast");
+  const toastRowEl = el("toast-duration-row"), toastEl = el("toast");
+  const fmodeEl = el("fmode"), flistEl = el("flist");
+  const cleanEl = el("clean"), tfmtEl = el("tfmt"), tidleEl = el("tidle");
+  const startupEl = el("startup"), syncGlobalEl = el("sync-global");
+  const preview = el("preview");
+  const topUrlDisplay = el("top-url-display");
+  const copyUrlBox = el("copy-url-box"), copyUrlOverlay = el("copy-url-overlay");
+
+  let activeUrlTab = "override";
+  let lastSessionsKey = null;
+  let saveTimeout = null;
+  let copyTimeout = null;
+
+  function getSelectedFontFamily() {
+    return fontEl.value === "__custom__"
+      ? (fontCustomEl.value.replace(/[\x00-\x1f\x7f"';{}<>\\]/g, "").trim() || "Segoe UI")
+      : fontEl.value;
+  }
+
+  function applyFontToControls(fontName) {
+    const clean = (fontName || "Segoe UI").trim();
+    const matched = Array.from(fontEl.options).find(
+      opt => opt.value !== "__custom__" && opt.value.toLowerCase() === clean.toLowerCase()
+    );
+    if (matched) {
+      fontEl.value = matched.value;
+      fontCustomEl.value = "";
+    } else {
+      fontEl.value = "__custom__";
+      fontCustomEl.value = clean;
+    }
+    updateConditionalRows();
+  }
+
+  function getDisplayMode() {
+    if (autoHideToastEl.checked) return "toast";
+    if (showPausedEl.checked) return "always";
+    return "default";
+  }
+
+  function applyDisplayModeToToggles(mode) {
+    showPausedEl.checked = mode === "always";
+    autoHideToastEl.checked = mode === "toast";
+    updateConditionalRows();
+  }
+
+  function updateConditionalRows() {
+    toastRowEl.classList.toggle("hidden", !autoHideToastEl.checked);
+    customFontRowEl.classList.toggle("hidden", fontEl.value !== "__custom__");
+
+    const labels = {
+      allow: ["Included Apps", "Only apps matching these keywords will be displayed."],
+      block: ["Excluded Apps", "Apps matching these keywords will never be displayed."],
+      all: ["App Filter Keywords", "Select 'Included' or 'Excluded' above to filter by app keywords."]
+    };
+    const [lbl, desc] = labels[fmodeEl.value] || labels.all;
+    el("flist-label").textContent = lbl;
+    el("flist-desc").textContent = desc;
+  }
+
+  function buildWidgetOverrideUrl() {
+    const mode = getDisplayMode();
+    const params = new URLSearchParams({
+      theme: themeEl.value,
+      font: getSelectedFontFamily(),
+      font_size: fsEl.value,
+      mode,
+      w: wEl.value,
+      h: hEl.value,
+      radius: rEl.value,
+      opacity: oEl.value
+    });
+    if (mode === "toast") params.set("toast", toastEl.value);
+    return `${BASE_URL}/?${params.toString()}`;
+  }
+
+  function getActiveUrlString() {
+    if (activeUrlTab === "global") return `${BASE_URL}/`;
+    if (activeUrlTab === "text") {
+      const fmt = tfmtEl.value.trim();
+      return fmt ? `${BASE_URL}/text?${new URLSearchParams({ format: fmt })}` : `${BASE_URL}/text`;
+    }
+    return buildWidgetOverrideUrl();
+  }
+
+  function updateGeneratedUrls() {
+    topUrlDisplay.textContent = getActiveUrlString();
+
+    const nextSrc = syncGlobalEl.checked
+      ? "/?mode=always"
+      : `/?${new URLSearchParams({
+          mode: "always",
+          theme: themeEl.value,
+          font: getSelectedFontFamily(),
+          font_size: fsEl.value,
+          w: wEl.value,
+          h: hEl.value,
+          radius: rEl.value,
+          opacity: oEl.value
+        })}`;
+
+    if (preview.getAttribute("src") !== nextSrc) {
+      preview.setAttribute("src", nextSrc);
+    }
+  }
+
+  function resizePreview() {
+    preview.width = Math.max(300, Number(wEl.value) + 28);
+    preview.height = Math.max(110, Number(hEl.value) + 28);
+  }
+
+  async function loadInitial() {
+    const res = await fetch("/state", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    const c = data.config || {};
+
+    wEl.value = wRangeEl.value = c.width ?? 510;
+    hEl.value = hRangeEl.value = c.height ?? 122;
+    rEl.value = rRangeEl.value = c.radius ?? 10;
+    oEl.value = oRangeEl.value = c.opacity ?? 1.0;
+    fsEl.value = fsRangeEl.value = c.font_size ?? 22;
+
+    const loadedTheme = (c.theme || "default").toLowerCase();
+    themeEl.value = VALID_THEMES.has(loadedTheme) ? loadedTheme : "default";
+    applyFontToControls(c.font_family || "Segoe UI");
+    toastEl.value = c.toast_seconds ?? 8;
+    const loadedMode = (c.display_mode || (c.always_show ? "always" : "default")).toLowerCase();
+    applyDisplayModeToToggles(VALID_MODES.has(loadedMode) ? loadedMode : "default");
+
+    fmodeEl.value = c.filter_mode || "all";
+    flistEl.value = c.app_list || "";
+    cleanEl.checked = c.clean_titles !== false;
+    tfmtEl.value = c.text_format || "{artist} — {title}";
+    tidleEl.value = c.text_idle ?? "No track playing";
+    startupEl.checked = Boolean(data.run_on_startup);
+
+    updateConditionalRows();
+    resizePreview();
+    updateGeneratedUrls();
+    refreshStatus(data);
+  }
+
+  function refreshStatus(data) {
+    const isPlaying = Boolean(data.is_playing);
+    el("hud-dot").classList.toggle("playing", isPlaying);
+
+    const artist = data.artist ? `${data.artist} — ` : "";
+    el("live-title").textContent = data.title ? `${artist}${data.title}` : "Waiting for Media...";
+    el("live-sub").textContent = data.source_app || (isPlaying ? "Playing" : "Idle");
+
+    if (typeof data.run_on_startup === "boolean" && startupEl.checked !== data.run_on_startup) {
+      startupEl.checked = data.run_on_startup;
+    }
+
+    const sessions = data.active_sessions || [];
+    const currentTokens = flistEl.value.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+    const sessionsKey = JSON.stringify({ sessions, currentTokens });
+
+    if (sessionsKey !== lastSessionsKey) {
+      lastSessionsKey = sessionsKey;
+      const pillBox = el("session-pills");
+      pillBox.innerHTML = "";
+
+      if (sessions.length === 0) {
+        const empty = document.createElement("span");
+        empty.className = "setting-desc";
+        empty.textContent = "No active media apps detected right now.";
+        pillBox.appendChild(empty);
+        return;
+      }
+
+      sessions.forEach(app => {
+        const span = document.createElement("span");
+        const isListed = currentTokens.includes(app.toLowerCase());
+        span.className = `pill${isListed ? " active" : ""}`;
+        span.textContent = app;
+        span.onclick = () => {
+          const cur = flistEl.value.split(",").map(s => s.trim()).filter(Boolean);
+          const idx = cur.findIndex(item => item.toLowerCase() === app.toLowerCase());
+          if (idx >= 0) cur.splice(idx, 1);
+          else cur.push(app);
+          flistEl.value = cur.join(", ");
+          lastSessionsKey = null;
+          saveLive();
+        };
+        pillBox.appendChild(span);
+      });
+    }
+  }
+
+  function connectDashboardEvents() {
+    const es = new EventSource("/events");
+    es.onmessage = event => {
+      try { refreshStatus(JSON.parse(event.data)); } catch (_) {}
+    };
+    es.onerror = () => {
+      es.close();
+      setTimeout(connectDashboardEvents, 1000);
+    };
+  }
+
+  function saveLive() {
+    updateConditionalRows();
+    resizePreview();
+    topUrlDisplay.textContent = getActiveUrlString();
+
+    clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(async () => {
+      updateGeneratedUrls();
+      if (!syncGlobalEl.checked) return;
+
+      const mode = getDisplayMode();
+      try {
+        await fetch("/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            width: Number(wEl.value),
+            height: Number(hEl.value),
+            radius: Number(rEl.value),
+            opacity: Number(oEl.value),
+            always_show: mode === "always",
+            display_mode: mode,
+            toast_seconds: Number(toastEl.value),
+            theme: themeEl.value,
+            font_family: getSelectedFontFamily(),
+            font_size: Number(fsEl.value),
+            clean_titles: cleanEl.checked,
+            filter_mode: fmodeEl.value,
+            app_list: flistEl.value,
+            text_format: tfmtEl.value,
+            text_idle: tidleEl.value
+          })
+        });
+      } catch (_) {}
+    }, 120);
+  }
+
+  [[wRangeEl, wEl], [hRangeEl, hEl], [rRangeEl, rEl], [oRangeEl, oEl], [fsRangeEl, fsEl]]
+    .forEach(([rangeInput, numInput]) => {
+      rangeInput.addEventListener("input", () => { numInput.value = rangeInput.value; saveLive(); });
+      numInput.addEventListener("input", () => { rangeInput.value = numInput.value; saveLive(); });
+    });
+
+  showPausedEl.addEventListener("change", () => {
+    if (showPausedEl.checked) autoHideToastEl.checked = false;
+    saveLive();
+  });
+
+  autoHideToastEl.addEventListener("change", () => {
+    if (autoHideToastEl.checked) showPausedEl.checked = false;
+    saveLive();
+  });
+
+  fontEl.addEventListener("change", () => {
+    updateConditionalRows();
+    if (fontEl.value === "__custom__") fontCustomEl.focus();
+    saveLive();
+  });
+
+  [themeEl, fontCustomEl, toastEl, fmodeEl, flistEl, cleanEl, tfmtEl, tidleEl]
+    .forEach(input => input.addEventListener("input", saveLive));
+
+  syncGlobalEl.addEventListener("change", () => {
+    updateGeneratedUrls();
+    if (syncGlobalEl.checked) saveLive();
+  });
+
+  startupEl.addEventListener("change", async () => {
+    try {
+      await fetch("/startup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: startupEl.checked })
+      });
+    } catch (_) {}
+  });
+
+  document.querySelectorAll(".url-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".url-tab").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      activeUrlTab = btn.dataset.urlMode;
+      updateGeneratedUrls();
+    });
+  });
+
+  copyUrlBox.addEventListener("click", async () => {
+    clearTimeout(copyTimeout);
+    try {
+      await navigator.clipboard.writeText(getActiveUrlString());
+      copyUrlBox.classList.add("copied");
+      copyUrlOverlay.textContent = "Copied to clipboard!";
+    } catch (_) {
+      copyUrlBox.classList.remove("copied");
+      copyUrlOverlay.textContent = "Copy blocked by browser";
+    }
+    copyTimeout = setTimeout(() => {
+      copyUrlBox.classList.remove("copied");
+      copyUrlOverlay.textContent = "Click to copy URL";
+    }, 1400);
+  });
+
+  el("toggle-sources-btn").addEventListener("click", () => {
+    const isOpen = el("sources-drawer").classList.toggle("open");
+    el("toggle-sources-btn").textContent = isOpen ? "Hide active sources ▾" : "View active sources ▾";
+  });
+
+  document.querySelectorAll(".token-chip").forEach(chip => {
+    chip.addEventListener("click", () => {
+      const token = chip.dataset.token;
+      const start = tfmtEl.selectionStart ?? tfmtEl.value.length;
+      const end = tfmtEl.selectionEnd ?? tfmtEl.value.length;
+      tfmtEl.value = tfmtEl.value.slice(0, start) + token + tfmtEl.value.slice(end);
+      tfmtEl.focus();
+      saveLive();
+    });
+  });
+
+  const stageEl = el("stage");
+  document.querySelectorAll(".bg-swatch").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".bg-swatch").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      stageEl.className = `stage ${btn.dataset.bg}`;
+    });
+  });
+
+  const modalDefaults = el("modal-defaults");
+  el("btn-open-defaults").addEventListener("click", () => modalDefaults.classList.add("open"));
+  el("btn-cancel-defaults").addEventListener("click", () => modalDefaults.classList.remove("open"));
+  el("btn-confirm-defaults").addEventListener("click", () => {
+    wEl.value = wRangeEl.value = 510;
+    hEl.value = hRangeEl.value = 122;
+    rEl.value = rRangeEl.value = 10;
+    oEl.value = oRangeEl.value = 1.0;
+    fsEl.value = fsRangeEl.value = 22;
+    themeEl.value = "default";
+    applyFontToControls("Segoe UI");
+    toastEl.value = 8;
+    applyDisplayModeToToggles("default");
+    fmodeEl.value = "all";
+    flistEl.value = "";
+    cleanEl.checked = true;
+    tfmtEl.value = "{artist} — {title}";
+    tidleEl.value = "No track playing";
+    modalDefaults.classList.remove("open");
+    saveLive();
+  });
+
+  const modalLoad = el("modal-load");
+  const importUrlInput = el("import-url-input");
+  el("btn-open-load").addEventListener("click", () => {
+    importUrlInput.value = "";
+    importUrlInput.style.borderColor = "";
+    modalLoad.classList.add("open");
+    importUrlInput.focus();
+  });
+  el("btn-cancel-load").addEventListener("click", () => modalLoad.classList.remove("open"));
+  el("btn-confirm-load").addEventListener("click", () => {
+    const raw = importUrlInput.value.trim();
+    if (!raw) return;
+    try {
+      const p = new URL(raw, BASE_URL).searchParams;
+      const importedTheme = (p.get("theme") || "").trim().toLowerCase();
+      if (VALID_THEMES.has(importedTheme)) themeEl.value = importedTheme;
+
+      if (p.has("font") || p.has("font_family")) applyFontToControls(p.get("font") || p.get("font_family"));
+      if (p.has("font_size") || p.has("fontsize") || p.has("size")) {
+        fsEl.value = fsRangeEl.value = p.get("font_size") || p.get("fontsize") || p.get("size");
+      }
+      if (p.has("w") || p.has("width")) wEl.value = wRangeEl.value = p.get("w") || p.get("width");
+      if (p.has("h") || p.has("height")) hEl.value = hRangeEl.value = p.get("h") || p.get("height");
+      if (p.has("radius")) rEl.value = rRangeEl.value = p.get("radius");
+      if (p.has("opacity") || p.has("bg_alpha")) oEl.value = oRangeEl.value = p.get("opacity") || p.get("bg_alpha");
+      if (p.has("toast")) toastEl.value = p.get("toast");
+
+      const importedMode = (p.get("mode") || "").trim().toLowerCase();
+      if (VALID_MODES.has(importedMode)) {
+        applyDisplayModeToToggles(importedMode);
+      } else if (p.has("always_show")) {
+        const always = ["1", "true", "yes"].includes((p.get("always_show") || "").toLowerCase());
+        applyDisplayModeToToggles(always ? "always" : "default");
+      }
+      if (p.has("format")) tfmtEl.value = p.get("format");
+
+      modalLoad.classList.remove("open");
+      saveLive();
+    } catch (_) {
+      importUrlInput.style.borderColor = "#e11d48";
+    }
+  });
+
+  [modalDefaults, modalLoad].forEach(modal => {
+    modal.addEventListener("click", e => {
+      if (e.target === modal) modal.classList.remove("open");
+    });
+  });
+
+  loadInitial().catch(() => {}).finally(connectDashboardEvents);
+</script>
+</body>
+</html>

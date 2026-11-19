@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SMTC Now Playing Browser Source</title>
+<link id="gfont-link" rel="stylesheet" href="">
+<style>
+  :root {
+    --w: 510px;
+    --h: 122px;
+    --radius: 10px;
+    --font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-size: 22px;
+    --accent-r: 255;
+    --accent-g: 15;
+    --accent-b: 135;
+    --accent2-r: 0;
+    --accent2-g: 210;
+    --accent2-b: 255;
+    --accent: rgb(var(--accent-r), var(--accent-g), var(--accent-b));
+    --accent2: rgb(var(--accent2-r), var(--accent2-g), var(--accent2-b));
+    --bg-alpha: 1.0;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+  }
+
+  body {
+    background: transparent;
+    overflow: hidden;
+    font-family: var(--font-family);
+  }
+
+  #widget {
+    position: relative;
+    width: var(--w);
+    height: var(--h);
+    border-radius: var(--radius);
+    background-color: rgba(18, 18, 21, var(--bg-alpha));
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    align-items: center;
+    padding: 10px;
+    gap: 16px;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.38s cubic-bezier(0.22, 1, 0.36, 1),
+                transform 0.38s cubic-bezier(0.22, 1, 0.36, 1),
+                width 0.2s ease, height 0.2s ease, border-radius 0.2s ease;
+    overflow: hidden;
+  }
+
+  #widget.visible {
+    opacity: 1;
+    transform: translateY(0px);
+  }
+
+  #glass-bg {
+    position: absolute;
+    inset: -24px;
+    background-size: cover;
+    background-position: center;
+    filter: blur(26px) saturate(1.6) brightness(0.45);
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  #widget.theme-glass #glass-bg {
+    opacity: calc(var(--bg-alpha) * 0.92);
+  }
+
+  #widget::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 52px;
+    background: linear-gradient(
+      90deg,
+      rgba(var(--accent-r), var(--accent-g), var(--accent-b), 0.22),
+      rgba(var(--accent2-r), var(--accent2-g), var(--accent2-b), 0.16)
+    );
+    -webkit-mask-image: linear-gradient(to bottom, #000 0%, transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 0%, transparent 100%);
+    pointer-events: none;
+    transition: background 0.3s ease;
+    z-index: 0;
+  }
+
+  #art-box {
+    position: relative;
+    height: calc(var(--h) - 20px);
+    aspect-ratio: 1 / 1;
+    border-radius: 6px;
+    background-color: rgb(38, 38, 45);
+    flex-shrink: 0;
+    z-index: 1;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    transition: border-radius 0.3s ease;
+    overflow: hidden;
+  }
+
+  .art-layer {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background-size: cover;
+    background-position: center;
+    opacity: 0;
+    transition: opacity 0.35s ease;
+  }
+
+  .art-layer.active {
+    opacity: 1;
+  }
+
+  @keyframes vinyl-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  #widget.theme-vinyl #art-box {
+    border-radius: 50%;
+    border: 3px solid rgba(20, 20, 24, 0.95);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.10), 0 6px 16px rgba(0, 0, 0, 0.45);
+    animation: vinyl-spin 9s linear infinite paused;
+  }
+
+  #widget.theme-vinyl.is-playing #art-box {
+    animation-play-state: running;
+  }
+
+  #widget.theme-vinyl #art-box::after {
+    content: "";
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 22%; height: 22%;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: #121215;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8);
+    z-index: 2;
+  }
+
+  .right-col {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    padding-right: 8px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    z-index: 1;
+  }
+
+  .scroll-mask {
+    width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    position: relative;
+  }
+
+  #title, #artist {
+    display: inline-block;
+    white-space: nowrap;
+    line-height: 1.25;
+    will-change: transform;
+  }
+
+  #title {
+    color: #fff;
+    font-size: var(--font-size);
+    font-weight: 600;
+  }
+
+  #artist {
+    color: rgb(225, 225, 230);
+    font-size: calc(var(--font-size) * 0.727);
+    font-weight: 500;
+    margin-top: 2px;
+  }
+
+  .scrolling {
+    animation: text-scroll-return var(--scroll-duration, 8s) ease-in-out infinite;
+  }
+
+  @keyframes text-scroll-return {
+    0%, 20% { transform: translateX(0px); }
+    70%, 85% { transform: translateX(var(--scroll-dist, 0px)); }
+    100% { transform: translateX(0px); }
+  }
+
+  .time-row {
+    display: flex;
+    justify-content: space-between;
+    color: rgb(220, 220, 225);
+    font-size: calc(var(--font-size) * 0.59);
+    font-weight: 600;
+    margin-top: auto;
+    margin-bottom: 5px;
+  }
+
+  .bar-track {
+    width: 100%;
+    height: 5.5px;
+    background-color: rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+    position: relative;
+    margin-bottom: 4px;
+    overflow: hidden;
+  }
+
+  #bar-fill {
+    height: 100%;
+    width: 100%;
+    border-radius: 999px;
+    transform-origin: left center;
+    transform: scaleX(0);
+    will-change: transform;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    box-shadow:
+      0 0 6px rgba(var(--accent-r), var(--accent-g), var(--accent-b), 0.55),
+      0 0 14px rgba(var(--accent2-r), var(--accent2-g), var(--accent2-b), 0.35);
+    transition: background 0.25s ease, box-shadow 0.25s ease;
+  }
+
+  #widget.theme-compact {
+    padding: 8px 14px 12px 10px;
+    gap: 12px;
+  }
+  #widget.theme-compact #art-box {
+    height: calc(var(--h) - 20px);
+    border-radius: 6px;
+  }
+  #widget.theme-compact .time-row {
+    display: none;
+  }
+  #widget.theme-compact .bar-track {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 4px;
+    margin: 0;
+    border-radius: 0;
+  }
+</style>
+</head>
+<body>
+  <div id="widget">
+    <div id="glass-bg"></div>
+    <div id="art-box">
+      <div class="art-layer active" id="art-layer-0"></div>
+      <div class="art-layer" id="art-layer-1"></div>
+    </div>
+    <div class="right-col">
+      <div class="scroll-mask" id="title-mask">
+        <div id="title">Waiting for Media...</div>
+      </div>
+      <div class="scroll-mask" id="artist-mask">
+        <div id="artist">Play a track to display</div>
+      </div>
+      <div class="time-row">
+        <span id="pos">00:00</span>
+        <span id="dur">00:00</span>
+      </div>
+      <div class="bar-track">
+        <div id="bar-fill"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const params = new URLSearchParams(window.location.search);
+  const root = document.documentElement;
+  const el = id => document.getElementById(id);
+
+  const widgetEl = el("widget");
+  const glassBgEl = el("glass-bg");
+  const artLayers = [el("art-layer-0"), el("art-layer-1")];
+  const titleEl = el("title");
+  const artistEl = el("artist");
+  const posEl = el("pos");
+  const durEl = el("dur");
+  const barFillEl = el("bar-fill");
+  const gfontLinkEl = el("gfont-link");
+
+  const DEFAULT_ACCENT = [255, 15, 135];
+  const DEFAULT_ACCENT2 = [0, 210, 255];
+
+  const VALID_THEMES = new Set(["default", "vinyl", "glass", "compact"]);
+  const VALID_MODES = new Set(["default", "always", "toast"]);
+
+  const SYSTEM_FONTS = new Set([
+    "segoe ui", "arial", "consolas", "georgia", "trebuchet ms", "verdana",
+    "impact", "courier new", "times new roman", "tahoma", "comic sans ms",
+    "system-ui", "sans-serif", "serif", "monospace"
+  ]);
+
+  const paletteCanvas = document.createElement("canvas");
+  paletteCanvas.width = 64;
+  paletteCanvas.height = 64;
+  const paletteCtx = paletteCanvas.getContext("2d", { willReadFrequently: true });
+
+  function clamp(v, lo, hi) {
+    return Math.min(hi, Math.max(lo, v));
+  }
+
+  function rgbToHsv(r, g, b) {
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const delta = max - min;
+    let h = 0;
+    if (delta !== 0) {
+      if (max === r) h = (((g - b) / delta) % 6 + 6) % 6 / 6;
+      else if (max === g) h = (((b - r) / delta) + 2) / 6;
+      else h = (((r - g) / delta) + 4) / 6;
+    }
+    return [h, max === 0 ? 0 : delta / max, max];
+  }
+
+  function hsvToRgb(h, s, v) {
+    if (s === 0) return [v, v, v];
+    const h6 = h * 6;
+    const i = Math.floor(h6);
+    const f = h6 - i;
+    const p = v * (1 - s);
+    const q = v * (1 - s * f);
+    const t = v * (1 - s * (1 - f));
+    switch (((i % 6) + 6) % 6) {
+      case 0: return [v, t, p];
+      case 1: return [q, v, p];
+      case 2: return [p, v, t];
+      case 3: return [p, q, v];
+      case 4: return [t, p, v];
+      default: return [v, p, q];
+    }
+  }
+
+  function toU8Rgb(r, g, b) {
+    return [Math.floor(r * 255), Math.floor(g * 255), Math.floor(b * 255)];
+  }
+
+  // Browser-side 36-bin HSV palette extraction matching the original Rust algorithm.
+  function extractVibrantPalette(img) {
+    if (!paletteCtx) return [DEFAULT_ACCENT, DEFAULT_ACCENT2];
+    try {
+      paletteCtx.clearRect(0, 0, 64, 64);
+      paletteCtx.drawImage(img, 0, 0, 64, 64);
+      const data = paletteCtx.getImageData(0, 0, 64, 64).data;
+
+      const bins = Array.from({ length: 36 }, () => ({
+        areaWeight: 0, colorWeight: 0, r: 0, g: 0, b: 0, satSum: 0
+      }));
+      let neutralWeight = 0, neutralR = 0, neutralG = 0, neutralB = 0;
+
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] < 32) continue;
+        const rf = data[i] / 255, gf = data[i + 1] / 255, bf = data[i + 2] / 255;
+        const [h, s, v] = rgbToHsv(rf, gf, bf);
+        if (v < 0.15) continue;
+
+        if (s < 0.16) {
+          const nw = clamp(v, 0.25, 0.90);
+          neutralWeight += nw;
+          neutralR += rf * nw;
+          neutralG += gf * nw;
+          neutralB += bf * nw;
+          continue;
+        }
+
+        const areaW = Math.pow(s, 0.8) * Math.pow(v, 0.9);
+        const colorW = (s * s) * Math.pow(v, 1.8);
+        const bin = bins[Math.floor(h * 36) % 36];
+        bin.areaWeight += areaW;
+        bin.colorWeight += colorW;
+        bin.r += rf * colorW;
+        bin.g += gf * colorW;
+        bin.b += bf * colorW;
+        bin.satSum += s * areaW;
+      }
+
+      let totalChromaArea = 0;
+      const smoothed = new Array(36);
+      let bestIdx = 0, bestArea = 0;
+      for (let i = 0; i < 36; i++) {
+        totalChromaArea += bins[i].areaWeight;
+        const area = bins[(i + 35) % 36].areaWeight * 0.25
+          + bins[i].areaWeight * 0.50
+          + bins[(i + 1) % 36].areaWeight * 0.25;
+        smoothed[i] = area;
+        if (area > bestArea) {
+          bestArea = area;
+          bestIdx = i;
+        }
+      }
+
+      if (bestArea <= 0 || totalChromaArea < neutralWeight * 0.06) {
+        if (neutralWeight > 0) {
+          const nr = clamp(neutralR / neutralWeight, 0.65, 0.92);
+          const ng = clamp(neutralG / neutralWeight, 0.65, 0.92);
+          const nb = clamp(neutralB / neutralWeight, 0.65, 0.92);
+          return [toU8Rgb(nr, ng, nb), toU8Rgb(nr * 0.68, ng * 0.68, nb * 0.68)];
+        }
+        return [[215, 215, 225], [145, 145, 160]];
+      }
+
+      const sampleCluster = center => {
+        let cwSum = 0, rSum = 0, gSum = 0, bSum = 0;
+        for (const i of [(center + 35) % 36, center, (center + 1) % 36]) {
+          cwSum += bins[i].colorWeight;
+          rSum += bins[i].r;
+          gSum += bins[i].g;
+          bSum += bins[i].b;
+        }
+        const denom = Math.max(cwSum, 1e-5);
+        const [h, s, v] = rgbToHsv(rSum / denom, gSum / denom, bSum / denom);
+        const outS = clamp(s * 1.15, 0.42, 0.86);
+        const outV = clamp(v * 1.18, 0.68, 0.92);
+        const [ro, go, bo] = hsvToRgb(h, outS, outV);
+        return [toU8Rgb(ro, go, bo), h, outS, outV];
+      };
+
+      const [primaryRgb, h1, s1, v1] = sampleCluster(bestIdx);
+
+      let bestSecIdx = -1, bestSecScore = -1;
+      for (let idx = 0; idx < 36; idx++) {
+        const diff = Math.abs(idx - bestIdx);
+        const circularDist = Math.min(diff, 36 - diff);
+        const area = smoothed[idx];
+        if (circularDist < 4 || area < bestArea * 0.05 || bins[idx].colorWeight <= 0) continue;
+
+        const avgSat = clamp(bins[idx].satSum / Math.max(bins[idx].areaWeight, 1e-5), 0.2, 1.0);
+        const contrastBonus = 0.45 + 0.55 * Math.sin((circularDist / 18) * (Math.PI / 2));
+        const score = Math.pow(area, 0.60) * Math.pow(avgSat, 1.3) * contrastBonus;
+        if (score > bestSecScore) {
+          bestSecScore = score;
+          bestSecIdx = idx;
+        }
+      }
+
+      let secondaryRgb;
+      if (bestSecIdx >= 0) {
+        secondaryRgb = sampleCluster(bestSecIdx)[0];
+      } else {
+        const h2 = (h1 + 0.06) % 1;
+        const v2 = v1 > 0.76 ? Math.max(v1 - 0.20, 0.52) : Math.min(v1 + 0.18, 0.94);
+        const [r2, g2, b2] = hsvToRgb(h2, Math.max(s1 * 0.92, 0.38), v2);
+        secondaryRgb = toU8Rgb(r2, g2, b2);
+      }
+
+      return [primaryRgb, secondaryRgb];
+    } catch (_) {
+      return [DEFAULT_ACCENT, DEFAULT_ACCENT2];
+    }
+  }
+
+  function applyAccents(a1, a2) {
+    const key = `${a1.join(",")}|${a2.join(",")}`;
+    if (key === lastAccentKey) return;
+    root.style.setProperty("--accent-r", a1[0]);
+    root.style.setProperty("--accent-g", a1[1]);
+    root.style.setProperty("--accent-b", a1[2]);
+    root.style.setProperty("--accent2-r", a2[0]);
+    root.style.setProperty("--accent2-g", a2[1]);
+    root.style.setProperty("--accent2-b", a2[2]);
+    lastAccentKey = key;
+  }
+
+  function parseNumericParam(value, min, max) {
+    if (value === null || value.trim() === "") return null;
+    const num = Number.parseFloat(value);
+    return Number.isFinite(num) ? Math.min(max, Math.max(min, num)) : null;
+  }
+
+  function sanitizeFontName(raw) {
+    if (!raw) return null;
+    const cleaned = raw.replace(/[\x00-\x1f\x7f"';{}<>\\]/g, "").trim();
+    return cleaned.length > 0 ? cleaned.slice(0, 128) : null;
+  }
+
+  function sanitizeChoice(raw, allowlist) {
+    if (!raw) return null;
+    const lower = raw.trim().toLowerCase();
+    return allowlist.has(lower) ? lower : null;
+  }
+
+  const urlW = parseNumericParam(params.get("w") ?? params.get("width"), 260, 1920);
+  const urlH = parseNumericParam(params.get("h") ?? params.get("height") ?? params.get("length"), 80, 600);
+  const urlRadius = parseNumericParam(params.get("radius"), 0, 60);
+  const urlOpacity = parseNumericParam(params.get("opacity") ?? params.get("bg_alpha"), 0.0, 1.0);
+  const urlTheme = sanitizeChoice(params.get("theme"), VALID_THEMES);
+  const urlFont = sanitizeFontName(params.get("font") ?? params.get("font_family"));
+  const urlFontSize = parseNumericParam(params.get("font_size") ?? params.get("fontsize") ?? params.get("size"), 12, 48);
+  const urlMode = sanitizeChoice(params.get("mode"), VALID_MODES);
+  const urlToastSec = parseNumericParam(params.get("toast"), 3, 60);
+  const urlAlwaysShow = params.has("always_show")
+    ? ["1", "true", "yes"].includes((params.get("always_show") || "").toLowerCase())
+    : null;
+
+  let state = { is_playing: false, position: 0, duration: 0, syncMono: performance.now() };
+  let currentMode = "default";
+  let activeArtIdx = 0;
+  let lastTitle = null, lastArtist = null, lastArtHash = -1;
+  let lastW = null, lastH = null, lastRadius = null, lastOpacity = null;
+  let lastTheme = null, lastFont = null, lastFontSize = null;
+  let lastAccentKey = "", lastPosText = "", lastDurText = "", lastScaleStr = "";
+  let toastUntilMono = 0, toastTimerId = null, layoutTimerId = null;
+  let wasPlaying = false, isWidgetVisible = false, rafId = null, hasConnectedOnce = false;
+
+  function refreshBothMarquees() {
+    updateScrollAnimation("title-mask", titleEl);
+    updateScrollAnimation("artist-mask", artistEl);
+  }
+
+  function applyFontFamily(fontName) {
+    const clean = sanitizeFontName(fontName) || "Segoe UI";
+    root.style.setProperty("--font-family", `"${clean}", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif`);
+
+    if (!SYSTEM_FONTS.has(clean.toLowerCase())) {
+      const href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(clean)}:wght@400;500;600;700&display=swap`;
+      if (gfontLinkEl.getAttribute("href") !== href) {
+        gfontLinkEl.setAttribute("href", href);
+      }
+    }
+
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(refreshBothMarquees);
+    }
+  }
+
+  function formatTime(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    const hrs = Math.floor(sec / 3600);
+    const mins = String(Math.floor((sec % 3600) / 60)).padStart(2, "0");
+    const secs = String(sec % 60).padStart(2, "0");
+    return hrs > 0 ? `${hrs}:${mins}:${secs}` : `${mins}:${secs}`;
+  }
+
+  function updateScrollAnimation(maskId, textEl) {
+    const maskEl = el(maskId);
+    if (!maskEl || !textEl) return;
+
+    textEl.classList.remove("scrolling");
+    textEl.style.removeProperty("--scroll-dist");
+    textEl.style.removeProperty("--scroll-duration");
+
+    void textEl.offsetWidth;
+
+    const overflowPx = textEl.scrollWidth - maskEl.clientWidth;
+    if (overflowPx > 2) {
+      const durationSec = Math.max(6.0, (overflowPx / 40.0) + 4.5);
+      textEl.style.setProperty("--scroll-dist", `-${overflowPx}px`);
+      textEl.style.setProperty("--scroll-duration", `${durationSec.toFixed(2)}s`);
+      textEl.classList.add("scrolling");
+    }
+  }
+
+  function crossfadeArtwork(artHash) {
+    const nextIdx = 1 - activeArtIdx;
+    const nextLayer = artLayers[nextIdx];
+    const curLayer = artLayers[activeArtIdx];
+
+    const clearToBlank = () => {
+      nextLayer.style.backgroundImage = "none";
+      nextLayer.classList.add("active");
+      curLayer.classList.remove("active");
+      glassBgEl.style.backgroundImage = "none";
+      activeArtIdx = nextIdx;
+      applyAccents(DEFAULT_ACCENT, DEFAULT_ACCENT2);
+    };
+
+    if (artHash <= 0) {
+      clearToBlank();
+      return;
+    }
+
+    const url = `/art?v=${artHash}`;
+    const img = new Image();
+    img.onload = () => {
+      if (lastArtHash !== artHash) return;
+      const [a1, a2] = extractVibrantPalette(img);
+      applyAccents(a1, a2);
+      const bgVal = `url('${url}')`;
+      nextLayer.style.backgroundImage = bgVal;
+      nextLayer.classList.add("active");
+      curLayer.classList.remove("active");
+      glassBgEl.style.backgroundImage = bgVal;
+      activeArtIdx = nextIdx;
+    };
+    img.onerror = () => {
+      if (lastArtHash !== artHash) return;
+      clearToBlank();
+    };
+    img.src = url;
+  }
+
+  function renderTimelineFrame() {
+    let curPos = state.position;
+    if (state.is_playing) {
+      curPos += (performance.now() - state.syncMono) / 1000.0;
+      if (state.duration > 0) curPos = Math.min(curPos, state.duration);
+    }
+
+    const posText = formatTime(curPos);
+    if (posText !== lastPosText) {
+      posEl.textContent = posText;
+      lastPosText = posText;
+    }
+
+    const durText = formatTime(state.duration);
+    if (durText !== lastDurText) {
+      durEl.textContent = durText;
+      lastDurText = durText;
+    }
+
+    const ratio = state.duration > 0 ? Math.min(1, Math.max(0, curPos / state.duration)) : 0;
+    const scaleStr = ratio.toFixed(4);
+    if (scaleStr !== lastScaleStr) {
+      barFillEl.style.transform = `scaleX(${scaleStr})`;
+      lastScaleStr = scaleStr;
+    }
+  }
+
+  function animateTimeline() {
+    rafId = null;
+    renderTimelineFrame();
+    if (state.is_playing && isWidgetVisible) {
+      rafId = requestAnimationFrame(animateTimeline);
+    }
+  }
+
+  function ensureAnimationLoop() {
+    renderTimelineFrame();
+    if (state.is_playing && isWidgetVisible && rafId === null) {
+      rafId = requestAnimationFrame(animateTimeline);
+    }
+  }
+
+  function evaluateVisibility() {
+    let shouldShow = false;
+    if (currentMode === "always") {
+      shouldShow = true;
+    } else if (currentMode === "toast") {
+      shouldShow = state.is_playing && (performance.now() < toastUntilMono);
+    } else {
+      shouldShow = state.is_playing;
+    }
+
+    isWidgetVisible = shouldShow;
+    widgetEl.classList.toggle("visible", shouldShow);
+    ensureAnimationLoop();
+  }
+
+  function applyServerState(data) {
+    const cfg = data.config || {};
+
+    const finalW = urlW ?? (cfg.width || 510);
+    const finalH = urlH ?? (cfg.height || 122);
+    const finalRadius = urlRadius ?? (cfg.radius ?? 10);
+    const finalOpacity = urlOpacity ?? (cfg.opacity ?? 1.0);
+    const finalTheme = urlTheme || sanitizeChoice(cfg.theme, VALID_THEMES) || "default";
+    const finalFont = urlFont || cfg.font_family || "Segoe UI";
+    const finalFontSize = urlFontSize ?? (cfg.font_size || 22);
+    const finalToastSec = urlToastSec ?? (cfg.toast_seconds || 8);
+
+    let finalMode = urlMode || sanitizeChoice(cfg.display_mode, VALID_MODES) || "default";
+    if (urlAlwaysShow === true || (urlMode === null && urlAlwaysShow === null && cfg.always_show)) {
+      finalMode = "always";
+    } else if (urlAlwaysShow === false && finalMode === "always") {
+      finalMode = "default";
+    }
+    currentMode = finalMode;
+
+    const layoutOrTypographyChanged =
+      finalW !== lastW || finalH !== lastH || finalFont !== lastFont || finalFontSize !== lastFontSize;
+
+    if (finalW !== lastW) { root.style.setProperty("--w", `${finalW}px`); lastW = finalW; }
+    if (finalH !== lastH) { root.style.setProperty("--h", `${finalH}px`); lastH = finalH; }
+    if (finalRadius !== lastRadius) { root.style.setProperty("--radius", `${finalRadius}px`); lastRadius = finalRadius; }
+    if (finalOpacity !== lastOpacity) { root.style.setProperty("--bg-alpha", finalOpacity); lastOpacity = finalOpacity; }
+    if (finalTheme !== lastTheme) {
+      widgetEl.classList.remove("theme-default", "theme-vinyl", "theme-glass", "theme-compact");
+      widgetEl.classList.add(`theme-${finalTheme}`);
+      lastTheme = finalTheme;
+    }
+    if (finalFont !== lastFont) { applyFontFamily(finalFont); lastFont = finalFont; }
+    if (finalFontSize !== lastFontSize) { root.style.setProperty("--font-size", `${finalFontSize}px`); lastFontSize = finalFontSize; }
+
+    const nowMono = performance.now();
+    const incomingPlaying = Boolean(data.is_playing);
+    const incomingPos = data.position || 0;
+    const incomingDur = data.duration || 0;
+
+    const newTitle = data.title || "Waiting for Media...";
+    const newArtist = data.artist || "";
+    const isInitialLoad = lastTitle === null;
+    const trackChanged = !isInitialLoad && (newTitle !== lastTitle || newArtist !== lastArtist);
+
+    const curInterp = state.is_playing
+      ? state.position + (nowMono - state.syncMono) / 1000.0
+      : state.position;
+    const drift = incomingPos - curInterp;
+
+    if (
+      isInitialLoad || trackChanged || incomingPlaying !== state.is_playing ||
+      Math.abs(drift) > 1.5 || (incomingPos < 1.0 && curInterp > 2.0)
+    ) {
+      state.position = incomingPos;
+    } else if (incomingPlaying) {
+      state.position = Math.max(curInterp, curInterp + drift * 0.15);
+    } else {
+      state.position = incomingPos;
+    }
+    state.syncMono = nowMono;
+    state.is_playing = incomingPlaying;
+    state.duration = incomingDur;
+    widgetEl.classList.toggle("is-playing", state.is_playing);
+
+    if (isInitialLoad || trackChanged || (state.is_playing && !wasPlaying)) {
+      const durationMs = finalToastSec * 1000;
+      toastUntilMono = nowMono + durationMs;
+      clearTimeout(toastTimerId);
+      toastTimerId = setTimeout(evaluateVisibility, durationMs + 30);
+    }
+    wasPlaying = state.is_playing;
+
+    if (newTitle !== lastTitle) {
+      titleEl.textContent = newTitle;
+      lastTitle = newTitle;
+      updateScrollAnimation("title-mask", titleEl);
+    }
+
+    if (newArtist !== lastArtist) {
+      artistEl.textContent = newArtist;
+      lastArtist = newArtist;
+      updateScrollAnimation("artist-mask", artistEl);
+    }
+
+    if (layoutOrTypographyChanged) {
+      clearTimeout(layoutTimerId);
+      layoutTimerId = setTimeout(refreshBothMarquees, 220);
+    }
+
+    const artHash = data.art_hash || 0;
+    if (artHash !== lastArtHash) {
+      lastArtHash = artHash;
+      crossfadeArtwork(artHash);
+    }
+
+    evaluateVisibility();
+  }
+
+  async function waitForServerAndReload() {
+    try {
+      const res = await fetch("/state", { cache: "no-store" });
+      if (res.ok) {
+        window.location.reload();
+        return;
+      }
+    } catch (_) {}
+    setTimeout(waitForServerAndReload, 1000);
+  }
+
+  function connectEvents() {
+    const es = new EventSource("/events");
+    es.onopen = () => { hasConnectedOnce = true; };
+    es.onmessage = event => {
+      try { applyServerState(JSON.parse(event.data)); } catch (_) {}
+    };
+    es.onerror = () => {
+      es.close();
+      isWidgetVisible = false;
+      widgetEl.classList.remove("visible");
+      setTimeout(hasConnectedOnce ? waitForServerAndReload : connectEvents, 1000);
+    };
+  }
+
+  connectEvents();
+</script>
+</body>
+</html>
